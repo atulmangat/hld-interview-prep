@@ -1,0 +1,770 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Design Search Autocomplete — HLD Interview Prep</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+  <nav class="top-nav">
+    <div class="top-nav-inner">
+      <a href="../index.html" class="nav-logo">
+        <div class="nav-logo-icon">SD</div>
+        <span>HLD Interview Prep</span>
+      </a>
+      <div class="nav-actions">
+        <div class="nav-breadcrumb">
+          <a href="../index.html">Home</a>
+          <span class="separator">/</span>
+          <span class="current">Search Autocomplete</span>
+        </div>
+        <button class="theme-toggle" id="theme-toggle">&#x263E;</button>
+      </div>
+    </div>
+  </nav>
+  <div class="scroll-progress"></div>
+
+  <main class="main-content">
+    <div class="problem-page">
+      <!-- Sidebar TOC -->
+      <aside class="sidebar">
+        <div class="sidebar-title">On This Page</div>
+        <ul class="toc-list">
+          <li><a href="#requirements">Requirements</a></li>
+          <li><a href="#estimation">Capacity Estimation</a></li>
+          <li><a href="#api-design">API Design</a></li>
+          <li><a href="#data-model">Data Model</a></li>
+          <li><a href="#high-level-design">High-Level Design</a></li>
+          <li><a href="#deep-dive">Deep Dive</a></li>
+          <li><a href="#tradeoffs">Trade-offs</a></li>
+          <li><a href="#revision">Revision Checklist</a></li>
+        </ul>
+        <div class="progress-bar"><div class="progress-fill" style="width: 0%"></div></div>
+      </aside>
+
+      <div class="problem-content">
+        <!-- Header -->
+        <div class="problem-header">
+          <h1>Design Search Autocomplete</h1>
+          <p class="problem-subtitle">Design a search autocomplete (typeahead) system that returns the top 5 most relevant suggestions as a user types each character &mdash; supporting multi-language queries, personalized ranking, real-time popularity updates, and offensive content filtering &mdash; all with sub-100ms response latency at the scale of 10 billion queries per day.</p>
+          <div class="problem-meta-bar">
+            <span class="meta-badge difficulty-medium">Medium</span>
+            <span class="meta-badge">Platform</span>
+            <span class="meta-badge">Asked at: Google, Amazon, Bing</span>
+          </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- REQUIREMENTS -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="requirements"></span>
+        <section class="section">
+          <h2>1. Requirements</h2>
+
+          <h3>Functional Requirements</h3>
+          <ul class="content-list">
+            <li><strong>Prefix-based suggestions</strong> &mdash; As the user types each character, the system returns the top 5 matching search queries ranked by popularity/frequency. Typing &ldquo;din&rdquo; might return [&ldquo;dinner recipes&rdquo;, &ldquo;dinosaur games&rdquo;, &ldquo;dining table&rdquo;, &ldquo;dinner near me&rdquo;, &ldquo;dine in restaurants&rdquo;].</li>
+            <li><strong>Ranked by popularity</strong> &mdash; Suggestions are ordered by query frequency (how often users have searched for that term). More popular queries appear first. Ranking may also factor in recency, trending topics, and user context.</li>
+            <li><strong>Multi-language support</strong> &mdash; The system supports autocomplete in multiple languages (English, Spanish, Mandarin, etc.). Each language has its own trie or index. Language is detected from the user&rsquo;s locale or input characters.</li>
+            <li><strong>Personalization</strong> &mdash; Suggestions blend global popularity with the user&rsquo;s personal search history. If a user frequently searches &ldquo;dinner recipes keto&rdquo;, typing &ldquo;din&rdquo; should surface that query higher than the global ranking would suggest.</li>
+            <li><strong>Real-time updates</strong> &mdash; The suggestion corpus reflects recent trends. If a breaking news event causes &ldquo;earthquake today&rdquo; to spike in searches, it should appear in autocomplete within hours, not days.</li>
+          </ul>
+
+          <h3>Non-Functional Requirements</h3>
+          <ul class="content-list">
+            <li><strong>Ultra-low latency:</strong> Suggestions must be returned in under 100ms (p99). Users expect instant feedback as they type &mdash; any perceptible delay breaks the illusion of real-time assistance and degrades the search experience.</li>
+            <li><strong>Massive scale:</strong> Support 10 billion search queries per day. Each query involves an average of 4 keystrokes before the user selects a suggestion or submits, generating ~40 billion autocomplete requests per day.</li>
+            <li><strong>High availability:</strong> The system must be available 99.99% of the time. Autocomplete is a critical part of the search experience &mdash; if it fails, users see a blank dropdown, which feels broken even though search itself still works.</li>
+            <li><strong>Data freshness:</strong> The suggestion index should be updated at least hourly for trending topics and daily for the full corpus rebuild. Stale suggestions (e.g., showing last week&rsquo;s trending topics) erode user trust.</li>
+          </ul>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> Start by clarifying scope: &ldquo;Are we designing just the autocomplete suggestion service, or the full search engine?&rdquo; Autocomplete is a standalone service that sits in front of the search engine. Also ask: &ldquo;Should suggestions only match prefixes, or also substrings and fuzzy matches?&rdquo; Prefix matching is the standard expectation and maps cleanly to a trie data structure. Substring and fuzzy matching require an inverted index or n-gram approach, which is significantly more complex. Finally, clarify personalization depth: &ldquo;Is personalization based on search history only, or also location, device, and time of day?&rdquo;
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- ESTIMATION -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="estimation"></span>
+        <section class="section">
+          <h2>2. Capacity Estimation</h2>
+
+          <h3>Assumptions</h3>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Parameter</th>
+                  <th>Value</th>
+                  <th>Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Search queries per day</td>
+                  <td>10 billion</td>
+                  <td>Google-scale search volume</td>
+                </tr>
+                <tr>
+                  <td>Average keystrokes per query</td>
+                  <td>4</td>
+                  <td>Users type ~4 characters before selecting a suggestion or submitting</td>
+                </tr>
+                <tr>
+                  <td>Autocomplete requests per day</td>
+                  <td>~40 billion</td>
+                  <td>10B queries &times; 4 keystrokes = 40B requests (before debouncing)</td>
+                </tr>
+                <tr>
+                  <td>Unique queries in corpus</td>
+                  <td>5 million</td>
+                  <td>Distinct search terms stored in the trie (after deduplication and pruning)</td>
+                </tr>
+                <tr>
+                  <td>Average query length</td>
+                  <td>20 bytes</td>
+                  <td>~4 words, ~5 chars each</td>
+                </tr>
+                <tr>
+                  <td>Top-K per node</td>
+                  <td>5</td>
+                  <td>Each trie node caches the top 5 suggestions for its prefix</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>Throughput Calculation</h3>
+<pre><code>Autocomplete QPS (before optimization):
+  Requests/day          = 10B queries &times; 4 keystrokes = 40B requests/day
+  Requests/sec          = 40B / 86,400 &asymp; 460,000 QPS
+  Peak (3x)             &asymp; 1.4M QPS
+
+After client-side optimizations:
+  Debouncing (200ms)    &asymp; reduces requests by ~50%  &rarr; 230K QPS
+  Browser caching       &asymp; reduces requests by ~30%  &rarr; 160K QPS
+  Effective peak QPS    &asymp; 480K QPS
+
+  At ~10K QPS per server = ~50 query servers needed</code></pre>
+
+          <h3>Storage Calculation</h3>
+<pre><code>Trie data size:
+  Unique queries        = 5 million
+  Average query length  = 20 bytes
+  Raw query data        = 5M &times; 20 bytes = 100 MB
+
+  Trie node overhead:
+    Each character = 1 trie node
+    Average 20 chars per query, but nodes are shared (prefix compression)
+    Estimated unique nodes &asymp; 10 million
+    Per node: children map (~100 bytes) + top-5 cache (~200 bytes)
+              + frequency counter (~8 bytes) + isEnd flag (~1 byte)
+    Per node total &asymp; 300 bytes
+    Total trie size &asymp; 10M &times; 300 bytes = 3 GB
+
+  Fits comfortably in memory on a single server (modern servers have 64-256 GB RAM).
+  For redundancy and latency, replicate across multiple servers.</code></pre>
+
+          <div class="info-box note">
+            <strong>Key Insight:</strong> The numbers reveal that the trie itself is small (~3 GB) and fits entirely in memory. The challenge is not storage &mdash; it is serving 460K QPS with sub-100ms latency. This is a <strong>read-heavy, latency-sensitive</strong> system. The design should optimize for fast prefix lookups (in-memory trie with pre-computed top-K at each node) and aggressive caching (both server-side and client-side). The data gathering pipeline that builds and updates the trie is a separate, offline system that runs on a different cadence.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- API DESIGN -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="api-design"></span>
+        <section class="section">
+          <h2>3. API Design</h2>
+
+          <p>The autocomplete system exposes a single, lightweight <strong>GET endpoint</strong>. It must be fast, cacheable, and stateless. No authentication is strictly required for public search suggestions, but user context can be passed for personalization.</p>
+
+          <div class="api-endpoint">
+            <div class="api-endpoint-header">
+              <span class="api-method get">GET</span>
+              <span class="api-path">/api/v1/suggestions?prefix={prefix}&amp;limit={limit}&amp;lang={lang}&amp;user_id={user_id}</span>
+            </div>
+            <div class="api-endpoint-body">
+              <p>Return the top suggestions matching the given prefix, ranked by popularity. Results are returned in descending order of relevance score.</p>
+<pre><code>Request:
+  GET /api/v1/suggestions?prefix=din&amp;limit=5&amp;lang=en&amp;user_id=u_44556
+  Headers:
+    Accept: application/json
+    X-Request-ID: req_abc123       // For tracing and deduplication
+
+Query Parameters:
+  prefix    (required)  The characters typed so far. URL-encoded for special chars.
+  limit     (optional)  Number of suggestions to return. Default: 5, Max: 10.
+  lang      (optional)  Language code (ISO 639-1). Default: "en".
+  user_id   (optional)  For personalized suggestions. Omit for anonymous users.
+
+Response (200 OK):
+{
+  "prefix": "din",
+  "suggestions": [
+    {
+      "query": "dinner recipes",
+      "score": 98500,
+      "personalized": false
+    },
+    {
+      "query": "dinner recipes keto",
+      "score": 45200,
+      "personalized": true           // Boosted by user's search history
+    },
+    {
+      "query": "dinosaur games",
+      "score": 42100,
+      "personalized": false
+    },
+    {
+      "query": "dining table",
+      "score": 38700,
+      "personalized": false
+    },
+    {
+      "query": "dinner near me",
+      "score": 35400,
+      "personalized": false
+    }
+  ],
+  "cache_ttl": 300                    // Client should cache for 5 minutes
+}</code></pre>
+            </div>
+          </div>
+
+          <div class="info-box warning">
+            <strong>Why GET (not POST)?</strong> GET requests are <strong>cacheable</strong> by CDNs, browser caches, and intermediate proxies. Since autocomplete responses for a given prefix are the same for most users (the global ranking), caching at the CDN layer can absorb a massive percentage of traffic. POST requests are not cached by default. The trade-off is that query parameters are visible in server logs and browser history, but search prefixes are not sensitive data. For personalized results, the <code>user_id</code> parameter creates a unique cache key per user, which reduces cache hit rates &mdash; this is why personalization should be blended client-side when possible.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- DATA MODEL -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="data-model"></span>
+        <section class="section">
+          <h2>4. Data Model</h2>
+
+          <h3>Trie Node Structure</h3>
+          <p>The core data structure is a <strong>trie (prefix tree)</strong>. Each node represents a single character in a search query. The path from root to any node spells out a prefix. The key optimization is storing the <strong>top-K suggestions at each node</strong>, so query-time lookups are O(prefix_length) with no additional traversal.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    root((root)) --> d((d))
+    d --> i((i))
+    i --> n((n))
+    i --> s((s))
+    n --> n2((n))
+    n --> i2((i))
+    s --> n3((n))
+    n2 --> e((e))
+    n2 --> i3((i))
+    n3 --> e2((e))
+    e --> r((r..)):::end
+    i3 --> n4((n..)):::end
+    e2 --> y((y..)):::end
+    r --> g((g..)):::end
+
+    classDef end fill:#22c55e,color:#fff
+
+    info["TrieNode {children: Map, isEnd: bool, topQueries: top-5, frequency: int}"]
+    lookup["Lookup 'din': root → d → i → n → return node.topQueries — O(3)"]
+  </div></div>
+
+          <h3>Why Store Top-K at Each Node?</h3>
+          <div class="comparison-grid">
+            <div class="comparison-card">
+              <h4>Without Top-K Cache (Naive)</h4>
+<pre><code>Lookup "din":
+1. Traverse to node for "din"
+2. DFS entire subtree to find all
+   queries starting with "din"
+3. Sort all results by frequency
+4. Return top 5
+
+Subtree could have millions of nodes.
+DFS takes O(subtree_size) time.
+At 460K QPS, this is way too slow.</code></pre>
+            </div>
+            <div class="comparison-card">
+              <h4>With Top-K Cache (Optimized)</h4>
+<pre><code>Lookup "din":
+1. Traverse to node for "din"
+2. Return node.topQueries directly
+
+O(prefix_length) time — just follow
+the character edges.
+No DFS. No sorting. Just a pointer
+dereference.
+
+Pre-compute top-K during trie build.
+Trade space for time.</code></pre>
+            </div>
+          </div>
+
+          <h3>Query Frequency Table (Persistent Storage)</h3>
+          <p>The trie is an in-memory data structure rebuilt periodically. The source of truth for query frequencies is a persistent database table used by the data gathering pipeline.</p>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Column</th>
+                  <th>Type</th>
+                  <th>Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>query</code></td>
+                  <td>VARCHAR (PK)</td>
+                  <td>The normalized search query string</td>
+                </tr>
+                <tr>
+                  <td><code>frequency</code></td>
+                  <td>BIGINT</td>
+                  <td>Total number of times this query has been searched</td>
+                </tr>
+                <tr>
+                  <td><code>language</code></td>
+                  <td>VARCHAR</td>
+                  <td>Language code (en, es, zh, etc.)</td>
+                </tr>
+                <tr>
+                  <td><code>last_updated</code></td>
+                  <td>TIMESTAMP</td>
+                  <td>When the frequency was last recalculated</td>
+                </tr>
+                <tr>
+                  <td><code>is_filtered</code></td>
+                  <td>BOOLEAN</td>
+                  <td>Whether this query is blocked by the content filter</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="info-box note">
+            <strong>Key Insight:</strong> The trie is a <strong>read-optimized, derived data structure</strong> &mdash; it is not the source of truth. The source of truth is the query frequency table in the database, which is updated by the data gathering pipeline. The trie is rebuilt periodically (weekly full rebuild + hourly incremental updates) from this table and loaded into memory on the query servers. This separation of concerns means the query path (trie lookup) and the write path (frequency aggregation) are completely independent and can scale separately.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- HIGH-LEVEL DESIGN -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="high-level-design"></span>
+        <section class="section">
+          <h2>5. High-Level Design</h2>
+
+          <p>The system is split into two independent subsystems: a <strong>Data Gathering Service</strong> (offline pipeline that collects query logs, aggregates frequencies, and builds the trie) and a <strong>Query Service</strong> (online service that serves autocomplete requests from the in-memory trie). These two subsystems operate on completely different timescales and have different scaling characteristics.</p>
+
+          <h3>System Architecture</h3>
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    subgraph query["QUERY SERVICE (Online — Real-Time)"]
+        A["User Browser<br/>Debounce 200ms<br/>Local cache"] --> B["CDN / Edge Cache<br/>Cache by prefix<br/>TTL: 5min"]
+        B --> C["API Gateway<br/>Rate Limit, Routing"]
+        C --> D["Trie Query Servers<br/>Stateless, N replicas"]
+        D --> E["In-Memory Trie<br/>Lookup prefix → Return top 5<br/>O(prefix_length)"]
+    end
+
+    subgraph data["DATA GATHERING SERVICE (Offline — Batch + Streaming)"]
+        F["Search Engine<br/>Every search query is logged"] --> G["Query Log Stream<br/>Kafka"]
+        G --> H["Log Aggregator<br/>MapReduce / Spark / Flink"]
+        H --> I["Query Frequency DB<br/>query | freq"]
+        I --> J["Trie Builder<br/>Read freqs, Build trie,<br/>Compute top-K/node, Serialize"]
+        J --> K["Trie Snapshot<br/>S3 / HDFS<br/>Serialized binary ~3 GB"]
+    end
+
+    K -.->|Download & load| D
+  </div></div>
+
+          <h3>Request Flow</h3>
+          <div class="flow-container">
+            <div class="flow-box">User types &ldquo;din&rdquo;</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Browser debounces (200ms)</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">Check local cache</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">CDN / Edge cache</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">Trie Query Server</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Return top 5 suggestions</div>
+          </div>
+
+          <h3>Key Components</h3>
+          <ul class="content-list">
+            <li><strong>CDN / Edge Cache:</strong> Caches autocomplete responses by prefix at edge locations worldwide. Since the top suggestions for &ldquo;din&rdquo; are the same for most users in the same region, the CDN absorbs ~60% of traffic. TTL of 5 minutes balances freshness with cache hit rate.</li>
+            <li><strong>Trie Query Servers:</strong> Stateless servers that each hold a full copy of the in-memory trie (or a shard for very large tries). On receiving a request, they traverse the trie to the prefix node and return the pre-computed top-5 suggestions. Lookup is O(prefix_length) &mdash; typically 3-20 character traversals.</li>
+            <li><strong>Query Log Stream (Kafka):</strong> Every search query executed on the search engine is logged to Kafka with metadata (query text, timestamp, user_id, language, location). This is the raw input for the data gathering pipeline.</li>
+            <li><strong>Log Aggregator (MapReduce / Spark / Flink):</strong> Processes query logs to compute frequency counts per query. Runs as a batch job (weekly full aggregation) and a streaming job (hourly incremental updates for trending queries).</li>
+            <li><strong>Trie Builder:</strong> Reads aggregated frequencies from the database, constructs the trie, pre-computes top-K at each node, applies content filters, and serializes the trie to a binary snapshot file stored in S3/HDFS.</li>
+            <li><strong>Trie Snapshot (S3):</strong> The serialized trie file (~3 GB) is stored in object storage. Query servers download the latest snapshot on startup or when a new version is published. Blue-green deployment ensures zero-downtime updates.</li>
+          </ul>
+
+          <div class="info-box important">
+            <strong>Why Separate Data Gathering from Query Serving?</strong> The data gathering pipeline is a batch/streaming system that processes billions of log entries, runs MapReduce jobs, and rebuilds a multi-gigabyte trie. It is CPU-intensive, runs on a schedule, and tolerates minutes of latency. The query service is a real-time system that must respond in under 100ms at 460K QPS. Coupling these two would mean the query servers are doing heavy computation while trying to serve requests &mdash; a recipe for latency spikes. By separating them, the trie builder produces an immutable snapshot, and query servers simply load and serve it. Updates are atomic: swap the old trie for the new one.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- DEEP DIVE -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="deep-dive"></span>
+        <section class="section">
+          <h2>6. Deep Dive</h2>
+
+          <!-- 6a. Trie Data Structure -->
+          <h3>6a. Trie Data Structure &mdash; How It Works</h3>
+          <p>A trie (pronounced &ldquo;try&rdquo;, from re<em>trie</em>val) is a tree-like data structure where each node represents a single character. The path from the root to any node spells out a prefix. Tries are the canonical data structure for autocomplete because prefix lookup is O(prefix_length), regardless of how many queries are stored.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    subgraph construction["TRIE CONSTRUCTION — Insert: tree(10), try(20), true(15), toy(5), to(25)"]
+        R((root)) --> T((t))
+        T --> R2((r))
+        R2 --> E1((e))
+        R2 --> U((u))
+        R2 --> Y1((y · freq=20))
+        E1 --> E2((e)):::end
+        U --> E3((e)):::end
+        T --> O((o)):::end
+        O --> Y2((y)):::end
+    end
+
+    subgraph topk["TOP-K COMPUTATION — Bottom-up merge"]
+        direction LR
+        T2["Node 't' (prefix 't')<br/>top-5: to(25), try(20), true(15), tree(10), toy(5)"]
+        R3["Node 'r' (prefix 'tr')<br/>top-3: try(20), true(15), tree(10)"]
+        O2["Node 'o' (prefix 'to')<br/>top-2: to(25), toy(5)"]
+        T2 --- R3
+        T2 --- O2
+    end
+
+    classDef end fill:#22c55e,color:#fff
+  </div></div>
+
+          <div class="info-box note">
+            <strong>Time Complexity Summary:</strong> Building the trie is O(N &times; L) where N = number of queries and L = average query length. Computing top-K at each node is O(nodes &times; K) using a bottom-up merge. Lookup at query time is O(P) where P = prefix length &mdash; just follow the character edges and return the cached top-K. This is the key insight: we do expensive computation once during the build phase, so the query path is trivially fast.
+          </div>
+
+          <!-- 6b. Trie Optimization -->
+          <h3>6b. Trie Optimization</h3>
+          <p>A naive trie can be wasteful in memory and slow to build. Several optimizations make it production-ready.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    subgraph opt1["OPTIMIZATION 1: LIMIT MAX PREFIX LENGTH"]
+        A1["Problem: Deep paths for long queries<br/>(50+ chars)"] --> B1["Solution: Truncate to max prefix length<br/>(e.g., 50 chars)"]
+        B1 --> C1["Impact: Reduces trie depth ~20%"]
+    end
+
+    subgraph opt2["OPTIMIZATION 2: PRUNE LOW-FREQUENCY NODES"]
+        A2["Problem: Millions of one-off queries<br/>waste space"] --> B2["Solution: Frequency threshold<br/>(min 100 searches)"]
+        B2 --> C2["Impact: 100M raw → 5M indexed<br/>60 GB → 3 GB"]
+    end
+
+    subgraph opt3["OPTIMIZATION 3: PREFIX COMPRESSION (PATRICIA TRIE)"]
+        A3["Problem: Chains of single-child nodes"] --> B3["Solution: Collapse single-child chains<br/>into substring node"]
+        B3 --> C3["Impact: Reduces node count ~40%"]
+    end
+
+    subgraph opt4["OPTIMIZATION 4: CACHE TOP RESULTS AT EACH NODE"]
+        A4["Problem: DFS at query time is too slow"] --> B4["Solution: Pre-compute top-K<br/>during build"]
+        B4 --> C4["Impact: O(1) lookup after reaching node<br/>+200 bytes/node"]
+    end
+  </div></div>
+
+          <!-- 6c. Data Gathering Pipeline -->
+          <h3>6c. Data Gathering Pipeline</h3>
+          <p>The data gathering pipeline transforms raw search query logs into an optimized trie snapshot. It runs as both a <strong>weekly batch job</strong> (full rebuild) and an <strong>hourly streaming job</strong> (incremental updates for trending queries).</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    A["STEP 1: QUERY LOGGING<br/>Every search query → Kafka<br/>10B events/day ~115K events/sec"] --> B["STEP 2: AGGREGATION<br/>MapReduce / Spark<br/>Count query frequencies per time window<br/>Time-weighted: recent queries weighted higher"]
+    B --> C["STEP 3: FILTER<br/>Remove: below threshold, offensive,<br/>PII, spam/bot-generated"]
+    C --> D["STEP 4: TRIE BUILD<br/>Read freqs → Sort → Insert →<br/>Compute top-K/node → Compress →<br/>Serialize to binary (~10 min, ~3 GB)"]
+    D --> E["STEP 5: DEPLOY SNAPSHOT<br/>Upload to S3 → Notify servers →<br/>Blue-green swap → Atomic pointer swap<br/>Zero downtime"]
+  </div></div>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> Mention the dual-cadence update strategy: &ldquo;We run a full trie rebuild weekly using batch MapReduce over all historical query logs. For trending topics, we run an hourly streaming job (Flink/Spark Streaming) that computes frequency deltas and patches the trie incrementally. The hourly job only updates nodes whose frequency changed by more than 10%, keeping the patch small (~50 MB vs. 3 GB full rebuild). This gives us data freshness within 1 hour for trending queries without the cost of a full rebuild every hour.&rdquo;
+          </div>
+
+          <!-- 6d. Trie Storage and Sharding -->
+          <h3>6d. Trie Storage &mdash; Serialization and Sharding</h3>
+          <p>The trie must be serialized for storage and distribution, and potentially sharded for very large corpora that exceed a single server&rsquo;s memory.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    subgraph serialization["TRIE SERIALIZATION"]
+        A["In-Memory Trie"] --> B["Serialize to Binary Format<br/>Pre-order traversal with node metadata"]
+        B --> C["S3 / HDFS<br/>~3 GB binary file"]
+        C --> D["Query Server loads trie<br/>Deserialization ~5 seconds<br/>Memory-mapped for faster loading"]
+    end
+
+    subgraph sharding["SHARDING STRATEGY — Shard by first 2 characters"]
+        AG["API Gateway<br/>Routes by first char of prefix"] --> S1["Shard 'aa-az'<br/>Server 1"]
+        AG --> S2["Shard 'ba-bz'<br/>Server 2"]
+        AG --> S3["Shard 'ca-cz'<br/>Server 3"]
+        AG --> S4["Shard 'za-zz'<br/>Server 26"]
+        note["Handle hot-letter problem<br/>with weighted sharding<br/>or sub-shards (sa-sm, sn-sz)"]
+    end
+  </div></div>
+
+          <!-- 6e. Browser Caching and Debouncing -->
+          <h3>6e. Browser Caching and Debouncing</h3>
+          <p>Client-side optimizations are critical for reducing server load and improving perceived latency. Two techniques &mdash; debouncing and local caching &mdash; can eliminate 70-80% of requests before they reach the server.</p>
+
+          <div class="diagram-box">
+<pre>
+    DEBOUNCING — Wait Before Sending
+    ═══════════════════════════════════════════════════════════════
+
+    Without debouncing (user types "dinner" quickly):
+    ┌──────────────────────────────────────────────────────────┐
+    │  Keystroke    Time       Request Sent?                    │
+    │  ─────────    ────       ─────────────                    │
+    │  'd'          0ms        → GET /suggestions?prefix=d     │
+    │  'i'          80ms       → GET /suggestions?prefix=di    │
+    │  'n'          160ms      → GET /suggestions?prefix=din   │
+    │  'n'          240ms      → GET /suggestions?prefix=dinn  │
+    │  'e'          320ms      → GET /suggestions?prefix=dinne │
+    │  'r'          400ms      → GET /suggestions?prefix=dinner│
+    │                                                          │
+    │  6 requests sent. User only cares about the last one.    │
+    │  5 requests were wasted.                                 │
+    └──────────────────────────────────────────────────────────┘
+
+    With debouncing (200ms delay after last keystroke):
+    ┌──────────────────────────────────────────────────────────┐
+    │  Keystroke    Time       Request Sent?                    │
+    │  ─────────    ────       ─────────────                    │
+    │  'd'          0ms        [start 200ms timer]             │
+    │  'i'          80ms       [reset timer]                   │
+    │  'n'          160ms      [reset timer]                   │
+    │  'n'          240ms      [reset timer]                   │
+    │  'e'          320ms      [reset timer]                   │
+    │  'r'          400ms      [reset timer]                   │
+    │  (pause)      600ms      → GET /suggestions?prefix=dinner│
+    │                                                          │
+    │  1 request sent. 83% reduction!                          │
+    │                                                          │
+    │  But if user pauses mid-word:                            │
+    │  'd'          0ms        [start timer]                   │
+    │  'i'          80ms       [reset timer]                   │
+    │  'n'          160ms      [reset timer]                   │
+    │  (pause)      360ms      → GET /suggestions?prefix=din   │
+    │  'n'          500ms      [start timer]                   │
+    │  'e'          580ms      [reset timer]                   │
+    │  'r'          660ms      [reset timer]                   │
+    │  (pause)      860ms      → GET /suggestions?prefix=dinner│
+    │                                                          │
+    │  2 requests sent — user sees suggestions while pausing.  │
+    └──────────────────────────────────────────────────────────┘
+
+
+    BROWSER CACHING — Don't Re-fetch Known Prefixes
+    ═══════════════════════════════════════════════════════════════
+
+    Scenario: User types "din", sees suggestions, deletes back
+    to "di", then types "dis". Without caching, "di" is fetched
+    again even though we already have the results.
+
+    ┌──────────────────────────────────────────────────────────┐
+    │  Local Cache (in-memory Map, LRU eviction)               │
+    │                                                          │
+    │  cache = {                                               │
+    │    "d":   ["dinner recipes", "disney world", ...],       │
+    │    "di":  ["dinner recipes", "disney world", ...],       │
+    │    "din": ["dinner recipes", "dinosaur games", ...],     │
+    │  }                                                       │
+    │                                                          │
+    │  User deletes back to "di":                              │
+    │    → Cache HIT for "di" → show results instantly         │
+    │    → No network request needed                           │
+    │                                                          │
+    │  User types "dis":                                       │
+    │    → Cache MISS for "dis" → fetch from server            │
+    │    → Store result: cache["dis"] = [...]                  │
+    │                                                          │
+    │  Cache size: ~1000 entries × 200 bytes = 200 KB          │
+    │  Negligible memory footprint.                            │
+    │  TTL: 5 minutes (matches server cache TTL).              │
+    └──────────────────────────────────────────────────────────┘
+
+    Combined impact:
+    ┌──────────────────────────────────────────────────────────┐
+    │  Raw QPS (no optimization):        460,000 QPS           │
+    │  After debouncing (~50% reduction): 230,000 QPS          │
+    │  After browser cache (~30% of remaining): 160,000 QPS    │
+    │  After CDN cache (~60% of remaining):      64,000 QPS    │
+    │                                                          │
+    │  Effective server QPS: ~64K (86% reduction from raw)     │
+    └──────────────────────────────────────────────────────────┘
+</pre>
+          </div>
+
+          <div class="info-box note">
+            <strong>Adaptive Debounce:</strong> A fixed 200ms debounce works well for fast typists but feels sluggish for slow typists who pause between characters. An adaptive approach adjusts the debounce interval based on typing speed: if the user is typing quickly (inter-keystroke interval &lt; 100ms), use a longer debounce (300ms). If typing slowly (&gt; 300ms between keys), use a shorter debounce (100ms) or send immediately. This balances responsiveness with request reduction.
+          </div>
+
+          <!-- 6f. Personalization -->
+          <h3>6f. Personalization</h3>
+          <p>Personalized autocomplete blends the user&rsquo;s search history with global popularity to surface more relevant suggestions. The challenge is doing this without destroying cache efficiency.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    subgraph client["APPROACH 1: CLIENT-SIDE BLENDING"]
+        S1["Server returns<br/>Global top-K (cacheable)"] --> M["Client Blending<br/>score = α × global_rank<br/>+ β × local_frequency"]
+        L1["Local search history<br/>stored on device"] --> M
+        M --> R1["Blended suggestions<br/>preserves CDN cache"]
+    end
+
+    subgraph server["APPROACH 2: SERVER-SIDE PERSONALIZATION"]
+        S2["Global top-K from trie"] --> MR["Server merges<br/>and re-ranks"]
+        L2["User history from Redis<br/>per-user profile"] --> MR
+        MR --> R2["Personalized results<br/>lower cache hit rate ~10%<br/>+2-5ms latency"]
+    end
+  </div></div>
+
+          <!-- 6g. Filter Layer -->
+          <h3>6g. Filter Layer &mdash; Removing Offensive Content</h3>
+          <p>Autocomplete suggestions are highly visible &mdash; they appear before the user even finishes typing. Showing offensive, harmful, or inappropriate suggestions is a significant brand and legal risk. A multi-layered filter ensures problematic content never reaches users.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    Q["Query arrives"] --> B1["LAYER 1: BLOCKLIST<br/>(Build Time)<br/>Exact-match + regex rules<br/>Maintained by Trust & Safety"]
+    B1 -->|Pass| B2["LAYER 2: ML CLASSIFIER<br/>(Build Time)<br/>Toxicity / violence / adult /<br/>self-harm scoring"]
+    B2 -->|Pass| B3["LAYER 3: REAL-TIME FILTER<br/>(Query Time)<br/>In-memory blocklist ~10K entries<br/>Updated via config push within 1 min<br/>~0.1ms latency"]
+    B3 -->|Pass| R["Return suggestion"]
+    B1 -->|Block| BL["Blocked"]
+    B2 -->|Block| BL
+    B3 -->|Block| BL
+  </div></div>
+
+          <div class="info-box warning">
+            <strong>Why Filtering Matters:</strong> In 2013, Google&rsquo;s autocomplete suggested offensive completions for searches about certain ethnic groups, leading to lawsuits in multiple countries. Bing faced similar issues. Autocomplete suggestions carry an implicit endorsement &mdash; users perceive them as &ldquo;Google thinks I should search for this.&rdquo; A robust filtering pipeline is not optional; it is a legal and reputational necessity. Always mention this in interviews to show you think beyond pure engineering.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- TRADE-OFFS -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="tradeoffs"></span>
+        <section class="section">
+          <h2>7. Trade-offs</h2>
+
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Decision</th>
+                  <th>Option A</th>
+                  <th>Option B</th>
+                  <th>Recommendation</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>Trie vs. Inverted Index</strong></td>
+                  <td><strong>Trie:</strong> Purpose-built for prefix matching. O(prefix_length) lookup. Pre-computed top-K at each node. Compact in memory (~3 GB for 5M queries). Does not support substring or fuzzy matching.</td>
+                  <td><strong>Inverted Index (Elasticsearch):</strong> Supports prefix, substring, fuzzy, and phonetic matching. More flexible but heavier infrastructure. Slower for pure prefix queries (~5-10ms vs. &lt;1ms for trie). Requires a search cluster.</td>
+                  <td>Use a <strong>trie</strong> for the primary autocomplete path. The access pattern is exclusively prefix-based, and the trie&rsquo;s O(prefix_length) lookup with pre-computed top-K is unbeatable for latency. If substring or fuzzy matching is needed (e.g., &ldquo;recipes dinner&rdquo; matching &ldquo;dinner recipes&rdquo;), add an inverted index as a secondary fallback, not the primary path.</td>
+                </tr>
+                <tr>
+                  <td><strong>Real-time vs. Batch Updates</strong></td>
+                  <td><strong>Batch only (weekly rebuild):</strong> Simple pipeline. Full trie rebuild from aggregated data. Consistent, well-tested snapshots. Stale data &mdash; trending topics take up to a week to appear.</td>
+                  <td><strong>Real-time streaming:</strong> Flink/Spark Streaming processes query logs continuously. Trie updated every few minutes. Complex infrastructure. Risk of noisy/spammy data entering the trie before filtering.</td>
+                  <td>Use a <strong>hybrid approach</strong>: weekly full rebuild for the base trie + hourly incremental patches for trending queries. The hourly job only updates nodes with significant frequency changes (&gt;10% delta), keeping patches small. This balances freshness (trending topics appear within 1 hour) with stability (base trie is well-filtered and tested).</td>
+                </tr>
+                <tr>
+                  <td><strong>In-Memory Trie vs. Disk-Based Trie</strong></td>
+                  <td><strong>In-memory:</strong> Sub-millisecond lookups. Entire trie loaded into RAM. Limited by server memory (typically 64-256 GB). Requires full reload on restart.</td>
+                  <td><strong>Disk-based (memory-mapped file):</strong> Trie stored as a memory-mapped file. OS manages page caching. Can handle tries larger than RAM. Slightly higher latency for cold pages (~1-5ms).</td>
+                  <td>Use <strong>in-memory</strong> for the primary query path. At ~3 GB, the trie fits easily in RAM. The sub-millisecond lookup time is critical for meeting the 100ms end-to-end latency budget (which includes network, CDN, and client rendering time). Use memory-mapped files only if the trie grows beyond single-server memory (50M+ queries across all languages).</td>
+                </tr>
+                <tr>
+                  <td><strong>Global vs. Personalized Ranking</strong></td>
+                  <td><strong>Global only:</strong> Same suggestions for all users. Highly cacheable (CDN absorbs 60%+ traffic). Simple infrastructure. Misses user-specific relevance.</td>
+                  <td><strong>Personalized:</strong> Suggestions tailored to each user&rsquo;s history. Much better relevance. Destroys cache efficiency (each user gets unique results). Requires per-user storage and lookup.</td>
+                  <td>Use <strong>client-side blending</strong>: server returns global top-K (cacheable), client merges with local search history stored on the device. This preserves CDN cache efficiency while providing personalization. For logged-in users on premium products, consider server-side personalization with a per-user Redis lookup (+2-5ms latency).</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> When discussing the trie vs. inverted index trade-off, connect it to the access pattern: &ldquo;Our FR specifies prefix-based matching, and our NFR requires sub-100ms latency at 460K QPS. A trie gives us O(prefix_length) lookups with pre-computed results &mdash; effectively O(1) after reaching the node. Elasticsearch would add 5-10ms per query plus cluster management overhead. The trie is the right tool for this specific job. If the requirements change to include fuzzy or substring matching, we&rsquo;d revisit this decision.&rdquo;
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- REVISION CHECKLIST -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="revision"></span>
+        <section class="section">
+          <h2>8. Revision Checklist</h2>
+          <p>Use this checklist to verify you can recall the key concepts before your interview.</p>
+
+          <div class="checklist">
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>The system has <strong>two independent subsystems</strong>: a Data Gathering Service (offline pipeline: query logs &rarr; MapReduce aggregation &rarr; trie builder &rarr; snapshot to S3) and a Query Service (online: load trie into memory, serve prefix lookups). They operate on different timescales and scale independently.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>The core data structure is a <strong>trie (prefix tree)</strong> where each node stores the <strong>top-K suggestions</strong> pre-computed during build time. This eliminates DFS at query time, making lookups O(prefix_length) &mdash; typically 3-20 character traversals taking &lt;1ms.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Trie optimizations</strong> include: (1) limit max prefix length to 50 chars, (2) prune queries below a frequency threshold (min 100 searches), (3) prefix compression (Patricia trie) to collapse single-child chains, (4) cache top-K at each node. These reduce the trie from ~60 GB to ~3 GB.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>The <strong>data gathering pipeline</strong> runs on a dual cadence: weekly full rebuild (batch MapReduce over all historical logs) + hourly incremental patches (streaming job for trending queries with &gt;10% frequency delta). Time-weighted aggregation ensures recent queries are ranked higher than stale ones.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Client-side optimizations</strong> reduce server load by ~86%: debouncing (200ms delay after last keystroke, ~50% reduction), browser caching (LRU cache of prefix &rarr; results, ~30% reduction), and CDN edge caching (TTL 5 min, ~60% of remaining). Raw 460K QPS drops to ~64K effective server QPS.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Trie deployment</strong> uses blue-green swap: the trie builder serializes a new snapshot to S3, query servers download it in the background, load into memory, and atomically swap the pointer from old trie to new trie. Zero downtime. Old trie is garbage collected after in-flight requests drain.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Personalization</strong> uses client-side blending: server returns global top-K (cacheable by CDN), client merges with local search history stored on the device. This preserves CDN cache efficiency (~60% hit rate) while providing personalized suggestions without sending user data to the server.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Content filtering</strong> operates at three layers: (1) blocklist at build time (exact match + regex), (2) ML toxicity classifier at build time, (3) real-time emergency blocklist at query time (in-memory hash set, ~0.1ms, updated via config push within minutes). Filtering is a legal and reputational necessity, not optional.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>For <strong>sharding large tries</strong>, partition by the first 1-2 characters of the prefix. The API gateway routes requests to the correct shard. Handle hot-letter imbalance (e.g., &lsquo;s&rsquo; has more queries than &lsquo;x&rsquo;) with weighted sharding or sub-shards for popular prefixes.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>At <strong>10B queries/day</strong> scale: 460K raw autocomplete QPS, ~3 GB trie fits in memory, 5M unique queries indexed, ~50 query servers needed (after client/CDN optimization). The system is <strong>read-heavy and latency-sensitive</strong> &mdash; optimize for fast prefix lookups and aggressive multi-layer caching.</span>
+            </label>
+          </div>
+        </section>
+
+        <!-- Bottom nav -->
+        <div class="problem-nav">
+          <a href="chat-system.html"><span class="nav-label">Previous</span><span class="nav-title">Chat System</span></a>
+          <a href="youtube.html" class="next"><span class="nav-label">Next</span><span class="nav-title">YouTube</span></a>
+        </div>
+      </div>
+    </div>
+  </main>
+  <script src="../js/app.js"></script>
+</body>
+</html>

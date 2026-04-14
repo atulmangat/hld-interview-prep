@@ -1,0 +1,1090 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Design News Feed System — HLD Interview Prep</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+  <nav class="top-nav">
+    <div class="top-nav-inner">
+      <a href="../index.html" class="nav-logo">
+        <div class="nav-logo-icon">SD</div>
+        <span>HLD Interview Prep</span>
+      </a>
+      <div class="nav-actions">
+        <div class="nav-breadcrumb">
+          <a href="../index.html">Home</a>
+          <span class="separator">/</span>
+          <span class="current">News Feed</span>
+        </div>
+        <button class="theme-toggle" id="theme-toggle">&#x263E;</button>
+      </div>
+    </div>
+  </nav>
+  <div class="scroll-progress"></div>
+
+  <main class="main-content">
+    <div class="problem-page">
+      <!-- Sidebar TOC -->
+      <aside class="sidebar">
+        <div class="sidebar-title">On This Page</div>
+        <ul class="toc-list">
+          <li><a href="#requirements">Requirements</a></li>
+          <li><a href="#estimation">Capacity Estimation</a></li>
+          <li><a href="#api-design">API Design</a></li>
+          <li><a href="#data-model">Data Model</a></li>
+          <li><a href="#high-level-design">High-Level Design</a></li>
+          <li><a href="#deep-dive">Deep Dive</a></li>
+          <li><a href="#tradeoffs">Trade-offs</a></li>
+          <li><a href="#revision">Revision Checklist</a></li>
+        </ul>
+        <div class="progress-bar"><div class="progress-fill" style="width: 0%"></div></div>
+      </aside>
+
+      <div class="problem-content">
+        <!-- Header -->
+        <div class="problem-header">
+          <h1>Design a News Feed System</h1>
+          <p class="problem-subtitle">Design a scalable news feed system that aggregates and delivers a personalized stream of posts from friends and followed accounts &mdash; supporting text, images, and video content, real-time updates, engagement actions (likes, comments), and intelligent ranking at the scale of hundreds of millions of daily active users.</p>
+          <div class="problem-meta-bar">
+            <span class="meta-badge difficulty-hard">Hard</span>
+            <span class="meta-badge">Social &amp; Feed</span>
+            <span class="meta-badge">Asked at: Meta, Twitter, LinkedIn</span>
+          </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- REQUIREMENTS -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="requirements"></span>
+        <section class="section">
+          <h2>1. Requirements</h2>
+
+          <h3>Functional Requirements</h3>
+          <ul class="content-list">
+            <li><strong>Publish posts</strong> &mdash; Users can create and publish posts containing text, images, or video. Posts are visible to their friends or followers.</li>
+            <li><strong>Personalized feed</strong> &mdash; Users see a feed composed of posts from people they follow or are friends with, ordered by relevance or recency.</li>
+            <li><strong>Multi-media support</strong> &mdash; Posts can contain plain text, images (up to 10 per post), or video (short-form and long-form). Media is stored separately and served via CDN.</li>
+            <li><strong>Likes and comments</strong> &mdash; Users can like and comment on posts. Like counts and top comments are displayed inline in the feed.</li>
+            <li><strong>Pagination</strong> &mdash; The feed supports infinite scroll with cursor-based pagination. Users can scroll back through older posts without missing or duplicating content.</li>
+            <li><strong>Follow/friend model</strong> &mdash; Support both symmetric (friend) and asymmetric (follow) relationships. A user&rsquo;s feed includes posts from all connections.</li>
+          </ul>
+
+          <h3>Non-Functional Requirements</h3>
+          <ul class="content-list">
+            <li><strong>Low latency:</strong> Feed generation must complete in under 500ms (p99). Users expect the feed to load instantly on app open.</li>
+            <li><strong>Massive scale:</strong> Support 500 million daily active users (DAU), each with an average of 300 friends/followed accounts.</li>
+            <li><strong>Eventual consistency:</strong> It is acceptable for a new post to take a few seconds to appear in all followers&rsquo; feeds. Availability is prioritized over strict consistency.</li>
+            <li><strong>High availability:</strong> The system must be available 99.99% of the time. Feed reads should never fail, even if the ranking service is degraded (fall back to chronological).</li>
+            <li><strong>Read-heavy:</strong> The read-to-write ratio is approximately 100:1. The architecture must be optimized for fast reads.</li>
+            <li><strong>Global distribution:</strong> Users are worldwide. Feed data must be served from geographically close data centers to minimize latency.</li>
+          </ul>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> Start by clarifying the social graph model. &ldquo;Is this a symmetric friendship model (like Facebook) or an asymmetric follow model (like Twitter/Instagram)?&rdquo; This fundamentally affects the fan-out strategy. In a follow model, celebrities with millions of followers create a massive write amplification problem that drives the entire architecture. Also clarify: &ldquo;Is the feed chronological or ranked?&rdquo; &mdash; ranked feeds require an ML ranking service, which adds significant complexity.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- ESTIMATION -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="estimation"></span>
+        <section class="section">
+          <h2>2. Capacity Estimation</h2>
+
+          <h3>Assumptions</h3>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Parameter</th>
+                  <th>Value</th>
+                  <th>Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Daily Active Users (DAU)</td>
+                  <td>500 million</td>
+                  <td>Facebook-scale system</td>
+                </tr>
+                <tr>
+                  <td>Average friends/followed per user</td>
+                  <td>300</td>
+                  <td>Mix of close friends and acquaintances</td>
+                </tr>
+                <tr>
+                  <td>Posts per user per day</td>
+                  <td>5 (among active posters)</td>
+                  <td>~10% of users post daily; rest are consumers</td>
+                </tr>
+                <tr>
+                  <td>Feed opens per user per day</td>
+                  <td>10</td>
+                  <td>Users check their feed multiple times daily</td>
+                </tr>
+                <tr>
+                  <td>Posts per feed page</td>
+                  <td>20</td>
+                  <td>Each scroll loads 20 posts</td>
+                </tr>
+                <tr>
+                  <td>Average post size</td>
+                  <td>~1 KB (metadata)</td>
+                  <td>Text + metadata; media stored separately on CDN</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>Throughput Calculation</h3>
+<pre><code>Write path (post creation):
+  Active posters       = 500M &times; 10% = 50M users
+  Posts per day         = 50M &times; 5 = 250M posts/day
+  Posts per second      = 250M / 86,400 &asymp; 2,900 posts/sec
+  Peak (5x)            &asymp; 14,500 posts/sec
+
+Read path (feed requests):
+  Feed opens per day   = 500M &times; 10 = 5 billion reads/day
+  Reads per second     = 5B / 86,400 &asymp; 58,000 reads/sec
+  Peak (3x)            &asymp; 174,000 reads/sec
+
+Fan-out (push model):
+  Each post fans out to avg 300 followers
+  Fan-out writes/sec   = 2,900 &times; 300 = 870,000 cache writes/sec
+  Peak fan-out          &asymp; 4.35M cache writes/sec</code></pre>
+
+          <h3>Storage Calculation</h3>
+<pre><code>Post metadata storage:
+  Per post             = ~1 KB (text, user_id, timestamp, media_urls)
+  Daily                = 250M &times; 1 KB = 250 GB/day
+  Yearly               = 250 GB &times; 365 = ~91 TB/year
+
+Feed cache (Redis):
+  Per user feed cache  = 500 post IDs &times; 8 bytes = 4 KB per user
+  Total feed cache     = 500M &times; 4 KB = 2 TB
+  With replication (3x)= 6 TB Redis cluster
+
+Media storage (CDN/S3):
+  ~20% of posts have images (avg 500 KB per post)
+  ~5% of posts have video (avg 50 MB per post)
+  Image storage/day    = 50M &times; 500 KB = 25 TB/day
+  Video storage/day    = 12.5M &times; 50 MB = 625 TB/day</code></pre>
+
+          <div class="info-box note">
+            <strong>Key Insight:</strong> The numbers reveal why news feed is a hard problem. At 58K reads/sec, the read path must be served from cache &mdash; hitting the database for every feed request is impossible. The fan-out write rate of 870K/sec is manageable for Redis, but a single celebrity post to 10M followers would generate 10M cache writes, creating a thundering herd problem. This is the core tension that drives the hybrid fan-out architecture.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- API DESIGN -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="api-design"></span>
+        <section class="section">
+          <h2>3. API Design</h2>
+
+          <div class="api-endpoint">
+            <div class="api-endpoint-header">
+              <span class="api-method post">POST</span>
+              <span class="api-path">/api/v1/feed/publish</span>
+            </div>
+            <div class="api-endpoint-body">
+              <p>Publish a new post. The post is persisted and then asynchronously fanned out to followers&rsquo; feed caches. Returns immediately with the post ID (does not wait for fan-out to complete).</p>
+<pre><code>Request:
+  POST /api/v1/feed/publish
+  Headers:
+    Content-Type: application/json
+    Authorization: Bearer &lt;user-token&gt;
+  Body:
+  {
+    "content": "Just visited the Grand Canyon! Absolutely breathtaking.",
+    "media": [
+      {
+        "type": "image",
+        "url": "https://cdn.example.com/uploads/img_abc123.jpg",
+        "width": 1920,
+        "height": 1080
+      }
+    ],
+    "visibility": "friends",          // friends | public | private
+    "location": {
+      "lat": 36.1069,
+      "lng": -112.1129,
+      "name": "Grand Canyon National Park"
+    }
+  }
+
+Response (201 Created):
+{
+  "post_id": "post_7f3a9b2c",
+  "user_id": "u_98765",
+  "content": "Just visited the Grand Canyon! Absolutely breathtaking.",
+  "media": [ ... ],
+  "created_at": "2026-04-14T10:30:00Z",
+  "status": "published",
+  "fan_out_status": "in_progress"
+}</code></pre>
+            </div>
+          </div>
+
+          <div class="api-endpoint">
+            <div class="api-endpoint-header">
+              <span class="api-method get">GET</span>
+              <span class="api-path">/api/v1/feed?cursor={cursor}&amp;limit={limit}</span>
+            </div>
+            <div class="api-endpoint-body">
+              <p>Retrieve the authenticated user&rsquo;s personalized feed. Returns a paginated list of posts from friends and followed accounts, ranked by the feed ranking algorithm. Uses cursor-based pagination for stable results during infinite scroll.</p>
+<pre><code>Request:
+  GET /api/v1/feed?cursor=eyJ0IjoiMjAyNi0wNC0xNFQxMDowMDowMFoifQ&amp;limit=20
+  Headers:
+    Authorization: Bearer &lt;user-token&gt;
+
+Response (200 OK):
+{
+  "posts": [
+    {
+      "post_id": "post_7f3a9b2c",
+      "author": {
+        "user_id": "u_11223",
+        "name": "Jane Smith",
+        "avatar_url": "https://cdn.example.com/avatars/u_11223.jpg"
+      },
+      "content": "Just visited the Grand Canyon!",
+      "media": [ ... ],
+      "created_at": "2026-04-14T10:30:00Z",
+      "engagement": {
+        "likes_count": 142,
+        "comments_count": 23,
+        "user_liked": false
+      },
+      "ranking_score": 0.92
+    },
+    ...
+  ],
+  "next_cursor": "eyJ0IjoiMjAyNi0wNC0xNFQwOTowMDowMFoifQ",
+  "has_more": true
+}</code></pre>
+            </div>
+          </div>
+
+          <div class="api-endpoint">
+            <div class="api-endpoint-header">
+              <span class="api-method get">GET</span>
+              <span class="api-path">/api/v1/feed/{post_id}</span>
+            </div>
+            <div class="api-endpoint-body">
+              <p>Retrieve a single post by ID, including full content, media, engagement metrics, and comments. Used when a user taps on a post from a notification or shared link.</p>
+<pre><code>Request:
+  GET /api/v1/feed/post_7f3a9b2c
+  Headers:
+    Authorization: Bearer &lt;user-token&gt;
+
+Response (200 OK):
+{
+  "post_id": "post_7f3a9b2c",
+  "author": {
+    "user_id": "u_11223",
+    "name": "Jane Smith",
+    "avatar_url": "https://cdn.example.com/avatars/u_11223.jpg"
+  },
+  "content": "Just visited the Grand Canyon! Absolutely breathtaking.",
+  "media": [
+    {
+      "type": "image",
+      "url": "https://cdn.example.com/uploads/img_abc123.jpg",
+      "width": 1920,
+      "height": 1080
+    }
+  ],
+  "visibility": "friends",
+  "location": {
+    "lat": 36.1069,
+    "lng": -112.1129,
+    "name": "Grand Canyon National Park"
+  },
+  "created_at": "2026-04-14T10:30:00Z",
+  "engagement": {
+    "likes_count": 142,
+    "comments_count": 23,
+    "shares_count": 5,
+    "user_liked": false
+  },
+  "comments": [
+    {
+      "comment_id": "cmt_xyz789",
+      "user": { "user_id": "u_44556", "name": "Bob Lee" },
+      "text": "Wow, stunning photo!",
+      "created_at": "2026-04-14T10:35:00Z",
+      "likes_count": 8
+    }
+  ]
+}</code></pre>
+            </div>
+          </div>
+
+          <div class="info-box warning">
+            <strong>Cursor-Based Pagination is Essential:</strong> Offset-based pagination (<code>?page=2&amp;limit=20</code>) breaks in a news feed because new posts are constantly being inserted at the top. If a user is on page 2 and 5 new posts arrive, offset-based pagination would shift all posts down, causing the user to see duplicates. Cursor-based pagination (<code>?cursor=last_seen_post_timestamp</code>) anchors to a specific point in time, ensuring stable results regardless of new insertions.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- DATA MODEL -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="data-model"></span>
+        <section class="section">
+          <h2>4. Data Model</h2>
+
+          <h3>users</h3>
+          <p>Core user table storing profile information.</p>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Column</th>
+                  <th>Type</th>
+                  <th>Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>user_id</code></td>
+                  <td>UUID (PK)</td>
+                  <td>Unique user identifier</td>
+                </tr>
+                <tr>
+                  <td><code>username</code></td>
+                  <td>VARCHAR (unique)</td>
+                  <td>Display handle (e.g., @janesmith)</td>
+                </tr>
+                <tr>
+                  <td><code>name</code></td>
+                  <td>VARCHAR</td>
+                  <td>Full display name</td>
+                </tr>
+                <tr>
+                  <td><code>avatar_url</code></td>
+                  <td>VARCHAR</td>
+                  <td>Profile picture URL on CDN</td>
+                </tr>
+                <tr>
+                  <td><code>follower_count</code></td>
+                  <td>INT</td>
+                  <td>Denormalized follower count (for celebrity detection)</td>
+                </tr>
+                <tr>
+                  <td><code>is_celebrity</code></td>
+                  <td>BOOLEAN</td>
+                  <td>True if follower_count &gt; threshold (e.g., 100K)</td>
+                </tr>
+                <tr>
+                  <td><code>created_at</code></td>
+                  <td>TIMESTAMP</td>
+                  <td>Account creation time</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>posts</h3>
+          <p>Stores all published posts. Sharded by <code>user_id</code> for write locality (all posts by a user on the same shard).</p>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Column</th>
+                  <th>Type</th>
+                  <th>Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>post_id</code></td>
+                  <td>UUID (PK)</td>
+                  <td>Unique post identifier (Snowflake ID for time-ordering)</td>
+                </tr>
+                <tr>
+                  <td><code>user_id</code></td>
+                  <td>UUID (FK, indexed)</td>
+                  <td>Author of the post</td>
+                </tr>
+                <tr>
+                  <td><code>content</code></td>
+                  <td>TEXT</td>
+                  <td>Post text content (max 5,000 chars)</td>
+                </tr>
+                <tr>
+                  <td><code>media_urls</code></td>
+                  <td>JSON</td>
+                  <td>Array of media objects [{type, url, width, height}]</td>
+                </tr>
+                <tr>
+                  <td><code>visibility</code></td>
+                  <td>ENUM</td>
+                  <td>friends, public, private</td>
+                </tr>
+                <tr>
+                  <td><code>likes_count</code></td>
+                  <td>INT</td>
+                  <td>Denormalized like count (updated async)</td>
+                </tr>
+                <tr>
+                  <td><code>comments_count</code></td>
+                  <td>INT</td>
+                  <td>Denormalized comment count</td>
+                </tr>
+                <tr>
+                  <td><code>created_at</code></td>
+                  <td>TIMESTAMP (indexed)</td>
+                  <td>Post creation time</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>friendships</h3>
+          <p>Stores the social graph. For symmetric friendships, store two rows (A&rarr;B and B&rarr;A). For asymmetric follows, store one row per follow.</p>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Column</th>
+                  <th>Type</th>
+                  <th>Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>user_id</code></td>
+                  <td>UUID (PK, part 1)</td>
+                  <td>The user who follows</td>
+                </tr>
+                <tr>
+                  <td><code>friend_id</code></td>
+                  <td>UUID (PK, part 2)</td>
+                  <td>The user being followed</td>
+                </tr>
+                <tr>
+                  <td><code>relationship_type</code></td>
+                  <td>ENUM</td>
+                  <td>friend, follow, close_friend</td>
+                </tr>
+                <tr>
+                  <td><code>created_at</code></td>
+                  <td>TIMESTAMP</td>
+                  <td>When the relationship was established</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>feed_cache (Redis)</h3>
+          <p>Pre-computed feed stored in Redis as a sorted set per user. This is the primary data structure that powers fast feed reads.</p>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Key / Field</th>
+                  <th>Type</th>
+                  <th>Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>feed:{user_id}</code></td>
+                  <td>Sorted Set (key)</td>
+                  <td>Redis key for the user&rsquo;s feed</td>
+                </tr>
+                <tr>
+                  <td><code>post_id</code></td>
+                  <td>Member</td>
+                  <td>The post ID stored in the sorted set</td>
+                </tr>
+                <tr>
+                  <td><code>timestamp / score</code></td>
+                  <td>Score</td>
+                  <td>Post timestamp (or ranking score) used for ordering</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+<pre><code>Redis operations for feed:
+
+  # Add a post to a user's feed (fan-out on write)
+  ZADD feed:u_98765 1713091800 post_7f3a9b2c
+
+  # Retrieve top 20 posts (most recent first)
+  ZREVRANGE feed:u_98765 0 19
+
+  # Cursor-based pagination (posts older than cursor timestamp)
+  ZREVRANGEBYSCORE feed:u_98765 1713091799 -inf LIMIT 0 20
+
+  # Trim feed to keep only latest 500 posts (memory management)
+  ZREMRANGEBYRANK feed:u_98765 0 -501</code></pre>
+
+          <div class="info-box note">
+            <strong>Graph DB for Social Connections:</strong> At scale, the friendships table becomes a bottleneck for queries like &ldquo;get all followers of user X&rdquo; or &ldquo;find mutual friends.&rdquo; Companies like Facebook use a specialized graph database (TAO) that stores the social graph in a distributed, cache-friendly format. For interviews, mentioning a graph database (Neo4j, or a custom solution like TAO) for the social graph shows depth. The posts and feed cache remain in relational/Redis stores.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- HIGH-LEVEL DESIGN -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="high-level-design"></span>
+        <section class="section">
+          <h2>5. High-Level Design</h2>
+
+          <p>The news feed system has two distinct data flows: the <strong>write path</strong> (publishing a post and distributing it to followers) and the <strong>read path</strong> (retrieving a user&rsquo;s personalized feed). The architecture is optimized for the read path since reads outnumber writes 100:1.</p>
+
+          <h3>System Architecture</h3>
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    subgraph WRITE PATH - Publishing
+        CW[Client App] --> PS[Post Service - Validate and Store]
+        PS --> PDB[Posts DB - PostgreSQL Sharded by user_id]
+        PS -->|Async via Message Queue| FOS[Fan-out Service]
+        FOS --> FC[Feed Cache - Redis Sorted Sets]
+        FOS --> SG[Social Graph - Friendships TAO]
+    end
+
+    subgraph READ PATH - Feed Retrieval
+        CR[Client App] --> FS[Feed Service - Read Hydrate Rank]
+        FS --> FCR[Feed Cache - Redis ZREVRANGE]
+        FS --> PC[Post Cache - Redis Memcached]
+        PC --> PDBR[Posts DB - Fallback]
+        FS --> RS[Ranking Service - ML Model]
+        FS -->|Return ranked feed| CR
+    end
+
+    subgraph SUPPORTING SERVICES
+        CDN[CDN - Images Videos Static]
+        MP[Media Processing - Resize Transcode]
+        NS[Notification Service - New Post Alerts]
+        AN[Analytics - Engagement Tracking]
+    end
+          </div></div>
+
+          <h3>Write Path Flow</h3>
+          <div class="flow-container">
+            <div class="flow-box">User publishes post</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Post Service</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">Store in Posts DB</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Message Queue</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">Fan-out Service</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Write to Feed Caches</div>
+          </div>
+
+          <h3>Read Path Flow</h3>
+          <div class="flow-container">
+            <div class="flow-box">User opens feed</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Feed Service</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">Read Feed Cache</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Hydrate Post Data</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">Merge Celebrity Posts</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Rank &amp; Return</div>
+          </div>
+
+          <h3>Key Components</h3>
+          <ul class="content-list">
+            <li><strong>Post Service:</strong> Stateless API that validates post content, stores it in the Posts DB, uploads media to object storage (S3), and enqueues a fan-out job to the message queue.</li>
+            <li><strong>Fan-out Service:</strong> Consumes from the message queue, looks up the author&rsquo;s followers in the social graph, and writes the post ID to each follower&rsquo;s feed cache in Redis. Skips fan-out for celebrity users (handled at read time).</li>
+            <li><strong>Feed Service:</strong> Reads the user&rsquo;s pre-computed feed from Redis, hydrates post details from the Post Cache, merges in celebrity posts (pull model), applies ranking, and returns the paginated result.</li>
+            <li><strong>Feed Cache (Redis):</strong> Sorted sets storing post IDs per user, ordered by timestamp or ranking score. This is the critical hot path &mdash; all feed reads hit Redis first.</li>
+            <li><strong>Ranking Service:</strong> ML model that scores and re-ranks feed items based on relevance signals (recency, engagement, relationship strength, content type).</li>
+          </ul>
+
+          <div class="info-box important">
+            <strong>Why Two Separate Paths?</strong> The write path and read path are decoupled by design. The Post Service returns <code>201 Created</code> immediately without waiting for fan-out to complete. Fan-out happens asynchronously via a message queue. This means a user&rsquo;s post may take 1&ndash;5 seconds to appear in all followers&rsquo; feeds (eventual consistency), but the publishing experience is instant. This trade-off is acceptable because users rarely check if their post appeared in a specific friend&rsquo;s feed immediately.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- DEEP DIVE -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="deep-dive"></span>
+        <section class="section">
+          <h2>6. Deep Dive</h2>
+
+          <!-- 6a. Fan-out on Write (Push Model) -->
+          <h3>6a. Fan-out on Write (Push Model)</h3>
+          <p>In the push model, when a user publishes a post, the system immediately pre-computes the feed for <em>every</em> follower by writing the post ID into each follower&rsquo;s feed cache. This makes reads extremely fast (just read from cache) at the cost of write amplification.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    subgraph Write Time
+        UA[User A publishes post_123] --> FOS[Fan-out Service]
+        FOS -->|Get followers of A| FL[Followers: B C D E]
+        FOS -->|ZADD feed:B| FB[Feed Cache B]
+        FOS -->|ZADD feed:C| FCa[Feed Cache C]
+        FOS -->|ZADD feed:D| FD[Feed Cache D]
+        FOS -->|ZADD feed:E| FE[Feed Cache E]
+    end
+
+    subgraph Read Time - User B opens feed
+        UB[User B] --> FSV[Feed Service]
+        FSV -->|ZREVRANGE feed:B 0 19| RD[Redis - Pre-computed Feed]
+        RD -->|1ms latency| RES[Return post_123 post_119 post_115 ...]
+    end
+          </div></div>
+
+          <h4>Advantages</h4>
+          <ul class="content-list">
+            <li>Extremely fast reads &mdash; feed is pre-computed in cache, just a single <code>ZREVRANGE</code> call.</li>
+            <li>Simple read path &mdash; no complex aggregation or merging at read time.</li>
+            <li>Real-time updates &mdash; new posts appear in followers&rsquo; feeds within seconds.</li>
+          </ul>
+
+          <h4>The Celebrity Problem</h4>
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    CEL[Celebrity publishes post - 10M followers] --> FOS[Fan-out Service]
+    FOS -->|ZADD| F1[Feed Cache follower_1]
+    FOS -->|ZADD| F2[Feed Cache follower_2]
+    FOS -->|ZADD| F3[Feed Cache follower_3]
+    FOS -.->|...| FN[Feed Cache follower_10M]
+
+    FOS --> PROB[10M Redis writes for ONE post]
+    PROB --> TIME[17 MINUTES to fan out]
+    PROB --> HOT[Hotspot on fan-out workers]
+    PROB --> WASTE[Wasted writes - 80 pct inactive users]
+    PROB --> MEM[Memory waste in 10M feed caches]
+          </div></div>
+
+          <div class="info-box warning">
+            <strong>This is the #1 insight interviewers want to hear.</strong> The push model works beautifully for normal users (avg 300 followers), but breaks catastrophically for celebrities. A single Cristiano Ronaldo post (600M followers on Instagram) would require 600 million cache writes. This is why no production system uses pure push &mdash; it always requires a hybrid approach.
+          </div>
+
+          <!-- 6b. Fan-out on Read (Pull Model) -->
+          <h3>6b. Fan-out on Read (Pull Model)</h3>
+          <p>In the pull model, no pre-computation happens at write time. When a user opens their feed, the system fetches recent posts from <em>all</em> friends/followed accounts on the fly, merges them, and returns the result.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    subgraph Read Time - User B opens feed
+        UB[User B follows 300 accounts] --> FS[Feed Service]
+        FS -->|Query posts from A| DBA[Posts DB - User A]
+        FS -->|Query posts from C| DBC[Posts DB - User C]
+        FS -->|Query posts from D| DBD[Posts DB - User D]
+        FS -.->|300 parallel queries| DBN[Posts DB - User N]
+        DBA --> MRG[Merge 6000 candidates]
+        DBC --> MRG
+        DBD --> MRG
+        DBN --> MRG
+        MRG --> SORT[Sort by timestamp or score]
+        SORT --> RET[Return top 20 - Latency 200 to 800ms]
+    end
+
+    subgraph Write Time - User A publishes
+        UA[User A] --> PSV[Post Service]
+        PSV -->|Single INSERT| DB[Posts DB]
+        PSV --> NOTE[No fan-out - No follower lookup - Instant]
+    end
+          </div></div>
+
+          <h4>Advantages</h4>
+          <ul class="content-list">
+            <li>No write amplification &mdash; publishing a post is a single DB write regardless of follower count.</li>
+            <li>No wasted computation &mdash; feed is only computed for users who actually open the app.</li>
+            <li>No celebrity problem &mdash; a celebrity post is just one row in the DB, not 10M cache writes.</li>
+          </ul>
+
+          <h4>Disadvantages</h4>
+          <ul class="content-list">
+            <li>Slow reads &mdash; 300 parallel queries + merge + sort on every feed open. Hard to hit &lt;500ms at scale.</li>
+            <li>High read-time compute cost &mdash; at 58K feed reads/sec, this means 17.4M DB queries/sec just for feed generation.</li>
+            <li>Difficult to rank &mdash; ranking requires all candidate posts to be available, which means fetching more data than needed.</li>
+          </ul>
+
+          <!-- 6c. Hybrid Approach -->
+          <h3>6c. Hybrid Approach (The Real-World Solution)</h3>
+          <p>This is the approach used by Facebook, Twitter/X, and Instagram in production. It combines push for normal users with pull for celebrities, getting the best of both worlds.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    subgraph Classification
+        PUB[User Publishes Post] --> CHK[Check Follower Count]
+        CHK -->|Below Threshold| PUSH[PUSH MODEL - Fan-out on Write]
+        CHK -->|Above Threshold| PULL[PULL MODEL - Fan-out on Read]
+        PUSH --> WFC[Write post_id to each followers feed cache]
+        PULL --> STO[Just store the post - No fan-out]
+        THR[Celebrity Threshold approx 10K to 100K followers]
+    end
+
+    subgraph Read Path - Merging Push and Pull
+        UB[User B opens feed - 295 normal plus 5 celebrities] --> FS[Feed Service]
+        FS --> S1[Step 1 - Read push cache ZREVRANGE - 1ms]
+        FS --> S2[Step 2 - Fetch celebrity posts - 5 parallel queries - 5ms]
+        S1 --> S3[Step 3 - Merge push plus pull results]
+        S2 --> S3
+        S3 --> S4[Step 4 - Return top 20 - Total 10 to 50ms]
+    end
+          </div></div>
+
+          <div class="comparison-grid">
+            <div class="comparison-card">
+              <h4>Push Model (Normal Users)</h4>
+              <ul class="content-list">
+                <li>Applied to ~99% of users (those with &lt;100K followers)</li>
+                <li>Fan-out to 300 followers = 300 Redis writes</li>
+                <li>Completes in milliseconds</li>
+                <li>Feed reads are a single cache lookup</li>
+              </ul>
+            </div>
+            <div class="comparison-card">
+              <h4>Pull Model (Celebrities)</h4>
+              <ul class="content-list">
+                <li>Applied to ~1% of users (those with &gt;100K followers)</li>
+                <li>Zero fan-out writes at publish time</li>
+                <li>Posts fetched at read time from post cache</li>
+                <li>Merged with push results before ranking</li>
+              </ul>
+            </div>
+            <div class="comparison-card">
+              <h4>Hybrid Result</h4>
+              <ul class="content-list">
+                <li>Eliminates the celebrity problem entirely</li>
+                <li>Read latency stays under 50ms (p99)</li>
+                <li>Write amplification is bounded and predictable</li>
+                <li>Used by Meta, Twitter/X, LinkedIn in production</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> The hybrid approach is the KEY insight that separates a good answer from a great one. Walk through the progression: &ldquo;We start with push for simplicity and fast reads. Then we identify the celebrity problem. Pure pull is too slow. So we combine both: push for the 99% of users with manageable follower counts, pull for the 1% who are celebrities. At read time, we merge both sources and rank.&rdquo; This demonstrates systematic problem-solving.
+          </div>
+
+          <!-- 6d. Feed Ranking -->
+          <h3>6d. Feed Ranking</h3>
+          <p>Modern feeds are not purely chronological. They use ML-based ranking to maximize user engagement by surfacing the most relevant content. This is what makes Facebook&rsquo;s and Instagram&rsquo;s feeds feel &ldquo;smart.&rdquo;</p>
+
+          <h4>Chronological vs. Ranked Feed</h4>
+          <div class="comparison-grid">
+            <div class="comparison-card">
+              <h4>Chronological Feed</h4>
+              <ul class="content-list">
+                <li>Posts ordered by timestamp (newest first)</li>
+                <li>Simple to implement (just sort by <code>created_at</code>)</li>
+                <li>Predictable for users &mdash; they know what to expect</li>
+                <li>Problem: important posts get buried by high-volume posters</li>
+                <li>Used by: Twitter (as an option), Mastodon, RSS readers</li>
+              </ul>
+            </div>
+            <div class="comparison-card">
+              <h4>Ranked Feed (ML-Based)</h4>
+              <ul class="content-list">
+                <li>Posts ordered by a relevance score computed by an ML model</li>
+                <li>Maximizes engagement (likes, comments, time spent)</li>
+                <li>Surfaces posts from close friends over acquaintances</li>
+                <li>Complex to build, requires feature engineering and model training</li>
+                <li>Used by: Facebook, Instagram, LinkedIn, TikTok</li>
+              </ul>
+            </div>
+          </div>
+
+          <h4>Ranking Signal Features</h4>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Signal Category</th>
+                  <th>Features</th>
+                  <th>Weight</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>Recency</strong></td>
+                  <td>Time since post was created. Exponential decay function &mdash; a 1-hour-old post scores higher than a 12-hour-old post.</td>
+                  <td>High</td>
+                </tr>
+                <tr>
+                  <td><strong>Engagement</strong></td>
+                  <td>Number of likes, comments, shares the post has received. High engagement signals quality content.</td>
+                  <td>High</td>
+                </tr>
+                <tr>
+                  <td><strong>Relationship Strength</strong></td>
+                  <td>How often the viewer interacts with the author (messages, profile visits, mutual likes). Close friends rank higher.</td>
+                  <td>Very High</td>
+                </tr>
+                <tr>
+                  <td><strong>Content Type</strong></td>
+                  <td>User&rsquo;s historical preference for content types (video vs. text vs. images). If user watches lots of videos, video posts rank higher.</td>
+                  <td>Medium</td>
+                </tr>
+                <tr>
+                  <td><strong>Content Freshness</strong></td>
+                  <td>Has the user already seen this post? Previously seen posts are demoted or hidden.</td>
+                  <td>High</td>
+                </tr>
+                <tr>
+                  <td><strong>Author Activity</strong></td>
+                  <td>How frequently the author posts. Posts from infrequent posters may be boosted to ensure visibility.</td>
+                  <td>Low</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    IN[Input - 500 candidate posts from push cache plus pull] --> FE[Step 1 - Feature Extraction]
+    FE --> REC[Recency score - exponential decay by age]
+    FE --> ENG[Engagement score - likes plus 2x comments]
+    FE --> REL[Relationship score - interaction frequency]
+    FE --> CTA[Content type affinity]
+    FE --> FRE[Freshness - 1.0 unseen or 0.1 seen]
+    REC --> SC[Step 2 - ML Model Scoring]
+    ENG --> SC
+    REL --> SC
+    CTA --> SC
+    FRE --> SC
+    SC --> DIV[Step 3 - Diversification]
+    DIV --> MIX1[Avoid consecutive posts from same author]
+    DIV --> MIX2[Mix content types]
+    DIV --> MIX3[Insert sponsored posts at intervals]
+    DIV --> RET[Step 4 - Return Top 20 sorted by score]
+    RET --> LAT[Latency budget under 50ms for 500 candidates]
+          </div></div>
+
+          <!-- 6e. Caching Strategy -->
+          <h3>6e. Caching Strategy</h3>
+          <p>The news feed is one of the most cache-intensive systems in all of software engineering. Multiple caching layers work together to ensure sub-100ms feed loads.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph LR
+    CC[Client Cache - On-device - TTL 5min - 30 pct hit] --> CDN[CDN - CloudFront Akamai - TTL 24h - 60 pct hit]
+    CDN --> AC[App Cache - Local in-memory - TTL 5min - 95 pct hit]
+    AC --> FC[Feed Cache - Redis Sorted Sets - No TTL - 99 pct hit]
+    FC --> DB[Posts DB - Source of Truth]
+
+    CC -.->|Reduces network requests| CDN
+    CDN -.->|Offloads 60 pct bandwidth| AC
+    AC -.->|Reduces Redis reads 10x| FC
+    FC -.->|Updated on fan-out| DB
+          </div></div>
+
+          <h4>Cache Invalidation Strategy</h4>
+          <ul class="content-list">
+            <li><strong>Feed cache:</strong> Updated on write (fan-out adds new post IDs). No TTL-based expiration &mdash; the cache is the primary read source. Stale entries are trimmed by keeping only the latest 500 posts per user (<code>ZREMRANGEBYRANK</code>).</li>
+            <li><strong>Post cache:</strong> Write-through cache. When a post is created or updated (e.g., like count changes), the cache is updated immediately. TTL of 5 minutes as a safety net.</li>
+            <li><strong>User profile cache:</strong> Cache-aside pattern. Read from cache first; on miss, read from DB and populate cache. TTL of 15 minutes. Invalidated on profile update.</li>
+            <li><strong>Engagement counts:</strong> Updated asynchronously via a counter service. Counts in the feed may be slightly stale (showing &ldquo;142 likes&rdquo; when the real count is 145). This is acceptable for a feed view &mdash; exact counts are shown on the post detail page.</li>
+          </ul>
+
+          <!-- 6f. Pagination -->
+          <h3>6f. Pagination &mdash; Cursor-Based vs. Offset-Based</h3>
+          <p>Pagination strategy is critical for a news feed because new content is constantly being inserted at the top of the list.</p>
+
+          <div class="comparison-grid">
+            <div class="comparison-card">
+              <h4>Offset-Based (Bad for Feeds)</h4>
+<pre><code>GET /feed?offset=20&limit=20
+
+Problem: New posts shift all offsets
+
+Time T1: Feed = [A, B, C, D, E, ...]
+  User sees page 1: [A, B, C, D, E]
+  (offset=0, limit=5)
+
+Time T2: New posts X, Y inserted
+  Feed = [X, Y, A, B, C, D, E, ...]
+  User requests page 2: offset=5
+  Gets: [C, D, E, F, G]
+  
+  User sees C, D, E AGAIN (duplicates!)
+  User never sees A, B (skipped!)</code></pre>
+            </div>
+            <div class="comparison-card">
+              <h4>Cursor-Based (Correct for Feeds)</h4>
+<pre><code>GET /feed?cursor=post_E_timestamp&limit=5
+
+Cursor anchors to a specific point
+
+Time T1: Feed = [A, B, C, D, E, ...]
+  User sees page 1: [A, B, C, D, E]
+  cursor = E.timestamp
+
+Time T2: New posts X, Y inserted
+  Feed = [X, Y, A, B, C, D, E, ...]
+  User requests page 2: cursor=E.ts
+  Gets: [F, G, H, I, J]
+  
+  No duplicates! No skipped posts!
+  X, Y will appear when user scrolls
+  back to top (pull-to-refresh).</code></pre>
+            </div>
+          </div>
+
+<pre><code>Cursor implementation with Redis sorted sets:
+
+  # Page 1: Get the 20 most recent posts
+  ZREVRANGEBYSCORE feed:u_98765 +inf -inf LIMIT 0 20
+  → Returns: [post_A (score: 1000), ..., post_T (score: 981)]
+  → next_cursor = base64encode({"score": 981, "post_id": "post_T"})
+
+  # Page 2: Get the next 20 posts after the cursor
+  ZREVRANGEBYSCORE feed:u_98765 (980 -inf LIMIT 0 20
+  → Returns: [post_U (score: 980), ..., post_AN (score: 961)]
+  → next_cursor = base64encode({"score": 961, "post_id": "post_AN"})
+
+  # The cursor is opaque to the client — they just pass it back.
+  # Using exclusive range "(980" ensures no duplicates even if
+  # multiple posts share the same score (use post_id as tiebreaker).</code></pre>
+
+          <div class="info-box note">
+            <strong>Cursor Encoding:</strong> The cursor is typically a base64-encoded JSON object containing the last seen score and post ID. It is opaque to the client &mdash; the client treats it as an arbitrary string and passes it back on the next request. This allows the server to change the cursor format without breaking clients. Never expose raw timestamps or database IDs in cursors, as this leaks internal implementation details.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- TRADE-OFFS -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="tradeoffs"></span>
+        <section class="section">
+          <h2>7. Trade-offs</h2>
+
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Decision</th>
+                  <th>Option A</th>
+                  <th>Option B</th>
+                  <th>Recommendation</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>Push vs. Pull vs. Hybrid Fan-out</strong></td>
+                  <td><strong>Push (fan-out on write):</strong> Pre-compute feeds on publish. O(1) reads but O(N) writes where N = follower count. Breaks for celebrities (N = millions).</td>
+                  <td><strong>Pull (fan-out on read):</strong> Compute feed on demand. O(1) writes but O(M) reads where M = following count. Slow reads at scale (300 queries per feed load).</td>
+                  <td>Use <strong>hybrid</strong>: push for normal users (&lt;100K followers), pull for celebrities. This bounds write amplification while keeping reads fast. The merge at read time adds ~10ms &mdash; negligible compared to the 17-minute fan-out a celebrity post would require in pure push.</td>
+                </tr>
+                <tr>
+                  <td><strong>Chronological vs. Ranked Feed</strong></td>
+                  <td><strong>Chronological:</strong> Simple, predictable, no ML infrastructure needed. Users see everything in time order. Important posts get buried by high-volume posters. Lower engagement metrics.</td>
+                  <td><strong>Ranked (ML-based):</strong> Surfaces relevant content, increases engagement 20&ndash;40%. Requires feature engineering, model training, A/B testing infrastructure. Users may feel manipulated or miss posts from certain friends.</td>
+                  <td>Use <strong>ranked feed as default</strong> with a chronological toggle for users who prefer it (like Twitter&rsquo;s &ldquo;Latest Tweets&rdquo;). Start with a simple heuristic ranking (recency + engagement + relationship) and evolve to ML-based ranking as the system matures.</td>
+                </tr>
+                <tr>
+                  <td><strong>Cache Invalidation Strategy</strong></td>
+                  <td><strong>Write-through:</strong> Update cache on every write. Always consistent. Higher write latency (must wait for cache update). More complex write path.</td>
+                  <td><strong>Write-behind (async):</strong> Update cache asynchronously after DB write. Lower write latency. Cache may be briefly stale. Simpler write path but requires a queue.</td>
+                  <td>Use <strong>write-through for the feed cache</strong> (fan-out writes directly to Redis) and <strong>write-behind for engagement counts</strong> (like/comment counts updated asynchronously). Feed correctness matters more than engagement count precision.</td>
+                </tr>
+                <tr>
+                  <td><strong>Consistency Model</strong></td>
+                  <td><strong>Strong consistency:</strong> A new post appears in all followers&rsquo; feeds immediately. Requires synchronous fan-out. Very high latency for writes. Not practical at scale.</td>
+                  <td><strong>Eventual consistency:</strong> A new post may take 1&ndash;5 seconds to appear in all feeds. Asynchronous fan-out via message queue. Acceptable UX &mdash; users don&rsquo;t notice a 2-second delay.</td>
+                  <td>Use <strong>eventual consistency</strong>. The author sees their own post immediately (read-your-writes consistency via local cache), but followers may see it after a short delay. This is the standard approach at Facebook, Twitter, and LinkedIn.</td>
+                </tr>
+                <tr>
+                  <td><strong>Feed Cache Size per User</strong></td>
+                  <td><strong>Small cache (100 posts):</strong> Lower memory usage. Frequent cache misses for users who scroll deep. Requires DB fallback for older posts.</td>
+                  <td><strong>Large cache (1,000+ posts):</strong> Higher memory usage (10x). Rare cache misses. Most feed requests served entirely from cache. Higher fan-out cost (more entries to maintain).</td>
+                  <td>Cache <strong>500 posts per user</strong> as a balance. This covers ~2 days of content for most users. For users who scroll beyond the cache, fall back to a pull-based query against the Posts DB. 500 post IDs &times; 8 bytes = 4 KB per user &times; 500M users = 2 TB total &mdash; feasible for a Redis cluster.</td>
+                </tr>
+                <tr>
+                  <td><strong>Post Storage: SQL vs. NoSQL</strong></td>
+                  <td><strong>SQL (PostgreSQL):</strong> Strong consistency, ACID transactions, rich query support. Harder to shard. Well-understood operational model.</td>
+                  <td><strong>NoSQL (Cassandra/DynamoDB):</strong> Built for horizontal scaling. Excellent write throughput. Limited query flexibility. Eventual consistency by default.</td>
+                  <td>Use <strong>SQL (PostgreSQL) sharded by user_id</strong> for posts. The query pattern is simple (get posts by user_id, ordered by time), which SQL handles well. Sharding by user_id ensures all posts by a user are on the same shard. At extreme scale (1B+ users), consider Cassandra for its native horizontal scaling.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> When discussing trade-offs, always tie your recommendation to the specific requirements. &ldquo;We chose eventual consistency because our NFR explicitly states availability over consistency, and a 2-second delay for a social media post is imperceptible to users. However, we ensure read-your-writes consistency for the author &mdash; it would be confusing if you published a post and couldn&rsquo;t see it in your own feed.&rdquo; This shows you understand the nuances, not just the theory.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- REVISION CHECKLIST -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="revision"></span>
+        <section class="section">
+          <h2>8. Revision Checklist</h2>
+          <p>Use this checklist to verify you can recall the key concepts before your interview.</p>
+
+          <div class="checklist">
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>The news feed has two distinct paths: the <strong>write path</strong> (publish post &rarr; fan-out to followers&rsquo; caches) and the <strong>read path</strong> (read from cache &rarr; hydrate &rarr; rank &rarr; return). They are decoupled by a message queue for async fan-out.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Fan-out on write (push model)</strong> pre-computes feeds at publish time. Reads are O(1) from cache. But it causes massive write amplification for celebrities &mdash; a user with 10M followers requires 10M cache writes per post.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Fan-out on read (pull model)</strong> computes feeds at read time by querying all followed users&rsquo; posts. No write amplification, but reads are slow (300 queries per feed load) and expensive at 58K reads/sec.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>The <strong>hybrid approach</strong> (used by Meta, Twitter, LinkedIn) pushes for normal users (&lt;100K followers) and pulls for celebrities at read time. This is the KEY insight &mdash; it eliminates the celebrity problem while keeping reads fast.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Feed ranking</strong> uses ML models with signals: recency (exponential decay), engagement (likes/comments), relationship strength (interaction frequency), content type affinity, and freshness (seen/unseen). Ranked feeds increase engagement 20&ndash;40% over chronological.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>The <strong>feed cache</strong> uses Redis sorted sets (<code>ZADD</code>, <code>ZREVRANGE</code>) with post IDs as members and timestamps/scores as scores. Each user&rsquo;s feed is capped at ~500 entries. Total cache size: ~2 TB for 500M users.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Cursor-based pagination</strong> is essential because new posts are constantly inserted at the top. Offset-based pagination causes duplicates and skipped posts. The cursor is an opaque base64-encoded token containing the last seen score/timestamp.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>The <strong>multi-layer cache</strong> (client &rarr; CDN &rarr; app cache &rarr; feed cache &rarr; DB) ensures &lt;0.1% of feed requests hit the database. CDN handles media (images/video), Redis handles feed data, and app-level cache handles hot post hydration.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Eventual consistency</strong> is acceptable: a new post may take 1&ndash;5 seconds to appear in all followers&rsquo; feeds. The author sees their own post immediately via <strong>read-your-writes consistency</strong> (local cache or session-sticky reads).</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>The <strong>social graph</strong> (friendships/follows) is stored in a graph database or specialized system (like Facebook&rsquo;s TAO) for efficient traversal. The <code>is_celebrity</code> flag on the user record determines the fan-out strategy.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Media handling:</strong> Images and videos are uploaded to object storage (S3), processed asynchronously (resize, transcode), and served via CDN. Post metadata in the DB stores only CDN URLs, not the media itself.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>At <strong>500M DAU</strong> scale: ~58K feed reads/sec, ~2,900 posts/sec, ~870K fan-out cache writes/sec. The system is extremely read-heavy (100:1 ratio), which is why the entire architecture is optimized for fast reads from pre-computed caches.</span>
+            </label>
+          </div>
+        </section>
+
+        <!-- Bottom nav -->
+        <div class="problem-nav">
+          <a href="notification-system.html"><span class="nav-label">Previous</span><span class="nav-title">Notification System</span></a>
+          <a href="chat-system.html" class="next"><span class="nav-label">Next</span><span class="nav-title">Chat System</span></a>
+        </div>
+      </div>
+    </div>
+  </main>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script src="../js/app.js"></script>
+</body>
+</html>

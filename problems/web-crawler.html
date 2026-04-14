@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Design Web Crawler — HLD Interview Prep</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+  <nav class="top-nav">
+    <div class="top-nav-inner">
+      <a href="../index.html" class="nav-logo">
+        <div class="nav-logo-icon">SD</div>
+        <span>HLD Interview Prep</span>
+      </a>
+      <div class="nav-actions">
+        <div class="nav-breadcrumb">
+          <a href="../index.html">Home</a>
+          <span class="separator">/</span>
+          <span class="current">Web Crawler</span>
+        </div>
+        <button class="theme-toggle" id="theme-toggle">&#x263E;</button>
+      </div>
+    </div>
+  </nav>
+  <div class="scroll-progress"></div>
+
+  <main class="main-content">
+    <div class="problem-page">
+      <!-- Sidebar TOC -->
+      <aside class="sidebar">
+        <div class="sidebar-title">On This Page</div>
+        <ul class="toc-list">
+          <li><a href="#requirements">Requirements</a></li>
+          <li><a href="#estimation">Capacity Estimation</a></li>
+          <li><a href="#high-level-design">High-Level Design</a></li>
+          <li><a href="#deep-dive">Deep Dive</a></li>
+          <li><a href="#tradeoffs">Trade-offs</a></li>
+          <li><a href="#revision">Revision Checklist</a></li>
+        </ul>
+        <div class="progress-bar"><div class="progress-fill" style="width: 0%"></div></div>
+      </aside>
+
+      <div class="problem-content">
+        <!-- Header -->
+        <div class="problem-header">
+          <h1>Design a Web Crawler</h1>
+          <p class="problem-subtitle">Design a distributed web crawler that systematically downloads and indexes 1 billion web pages per month &mdash; respecting robots.txt, handling redirects and malformed HTML, detecting spider traps, deduplicating content, and prioritizing important pages &mdash; all while being polite to web servers and extensible to new content types.</p>
+          <div class="problem-meta-bar">
+            <span class="meta-badge difficulty-medium">Medium</span>
+            <span class="meta-badge">Platform</span>
+            <span class="meta-badge">Asked at: Google, Amazon, Apple</span>
+          </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- REQUIREMENTS -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="requirements"></span>
+        <section class="section">
+          <h2>1. Requirements</h2>
+
+          <h3>Functional Requirements</h3>
+          <ul class="content-list">
+            <li><strong>Crawl 1 billion pages per month</strong> &mdash; The crawler must systematically discover and download web pages at scale, starting from a set of seed URLs and following hyperlinks to discover new pages. It must sustain a throughput of approximately 400 pages per second on average.</li>
+            <li><strong>Handle HTML content</strong> &mdash; Parse HTML pages to extract text content, metadata (title, description, keywords), and hyperlinks. The parser must handle malformed HTML gracefully (real-world HTML is rarely valid). Support for other content types (PDF, images) should be extensible.</li>
+            <li><strong>Respect robots.txt</strong> &mdash; Before crawling any page on a domain, fetch and obey the site&rsquo;s <code>robots.txt</code> file. Honor <code>Disallow</code> directives, <code>Crawl-delay</code> settings, and <code>Sitemap</code> references. Cache robots.txt per domain to avoid re-fetching it on every request.</li>
+            <li><strong>Handle redirects</strong> &mdash; Follow HTTP 301 (permanent) and 302 (temporary) redirects, up to a configurable maximum depth (e.g., 10 hops). Record the redirect chain for URL canonicalization. Detect redirect loops and abort.</li>
+            <li><strong>Detect and avoid spider traps</strong> &mdash; Identify pages that generate infinite URLs (e.g., calendar pages with endless date links, session ID parameters, URL query combinatorics). Enforce maximum URL depth, detect repetitive URL patterns, and cap pages crawled per domain.</li>
+            <li><strong>Store crawled content</strong> &mdash; Persist the raw HTML, extracted text, metadata, and outgoing links for each crawled page. Support efficient retrieval by URL and by content hash. Storage must handle 500 TB/month of new data.</li>
+          </ul>
+
+          <h3>Non-Functional Requirements</h3>
+          <ul class="content-list">
+            <li><strong>Scalability:</strong> The system must scale horizontally. Adding more crawler nodes should linearly increase throughput. The architecture must support scaling from 1 billion to 10 billion pages/month without fundamental redesign.</li>
+            <li><strong>Politeness:</strong> Do not overload web servers. Enforce per-domain rate limits (e.g., max 1 request per second per domain). Space out requests to the same domain. Identify the crawler via a descriptive User-Agent string. This is both an ethical requirement and a practical one &mdash; aggressive crawlers get IP-banned.</li>
+            <li><strong>Robustness:</strong> Handle malformed HTML, broken links, server errors (5xx), timeouts, and unexpected content types without crashing. Individual page failures must not affect the overall crawl. The system must recover gracefully from crawler node failures.</li>
+            <li><strong>Extensibility:</strong> The architecture should make it easy to add support for new content types (PDF, images, JavaScript-rendered pages), new crawl policies (priority adjustments, freshness requirements), and new output formats (search index, knowledge graph) without modifying the core crawl loop.</li>
+          </ul>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> Start by clarifying scope: &ldquo;Are we building a general-purpose web crawler like Googlebot, or a focused crawler for a specific domain (e.g., crawling product pages for price comparison)?&rdquo; A general-purpose crawler at 1B pages/month is the harder and more interesting problem. Also ask: &ldquo;Do we need to render JavaScript? Many modern sites are SPAs that require headless browser rendering.&rdquo; For a 45-minute interview, assume server-rendered HTML and call out JS rendering as an extension point.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- ESTIMATION -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="estimation"></span>
+        <section class="section">
+          <h2>2. Capacity Estimation</h2>
+
+          <h3>Assumptions</h3>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Parameter</th>
+                  <th>Value</th>
+                  <th>Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Pages to crawl per month</td>
+                  <td>1 billion</td>
+                  <td>General-purpose web crawl</td>
+                </tr>
+                <tr>
+                  <td>Average page size (HTML)</td>
+                  <td>500 KB</td>
+                  <td>Includes HTML, headers, metadata</td>
+                </tr>
+                <tr>
+                  <td>Average links per page</td>
+                  <td>50</td>
+                  <td>Outgoing hyperlinks extracted per page</td>
+                </tr>
+                <tr>
+                  <td>Unique domains</td>
+                  <td>~10 million</td>
+                  <td>Average 100 pages per domain</td>
+                </tr>
+                <tr>
+                  <td>DNS lookup time</td>
+                  <td>10 ms (cached) / 200 ms (uncached)</td>
+                  <td>DNS is a major bottleneck without caching</td>
+                </tr>
+                <tr>
+                  <td>HTTP download time</td>
+                  <td>200&ndash;500 ms</td>
+                  <td>Varies by server location and load</td>
+                </tr>
+                <tr>
+                  <td>Content duplication rate</td>
+                  <td>~30%</td>
+                  <td>Near-duplicate or exact-duplicate pages</td>
+                </tr>
+                <tr>
+                  <td>robots.txt cache TTL</td>
+                  <td>24 hours</td>
+                  <td>Re-fetch daily per domain</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>Throughput Calculation</h3>
+<pre><code>Pages per second:
+  1 billion pages / 30 days / 86,400 sec/day
+  = 1,000,000,000 / 2,592,000
+  &asymp; 400 pages/sec (average)
+
+  Peak (3x average):
+  &asymp; 1,200 pages/sec
+
+URLs discovered per second:
+  400 pages/sec &times; 50 links/page = 20,000 new URLs/sec
+  After dedup: ~5,000 truly new URLs/sec (75% already seen)
+
+DNS lookups per second:
+  400 pages/sec = 400 DNS lookups/sec
+  With caching (90% hit rate): ~40 uncached lookups/sec</code></pre>
+
+          <h3>Storage Calculation</h3>
+<pre><code>Raw HTML storage per month:
+  1 billion pages &times; 500 KB = 500 TB/month
+
+After compression (gzip, ~5x ratio):
+  500 TB / 5 = 100 TB/month compressed
+
+After content deduplication (~30% duplicates):
+  100 TB &times; 0.7 = 70 TB/month effective new storage
+
+URL frontier size:
+  Billions of discovered URLs &times; ~100 bytes/URL
+  = hundreds of GB (fits in distributed storage)
+
+Metadata storage (per page):
+  URL + content hash + timestamp + status = ~500 bytes
+  1 billion pages &times; 500 bytes = 500 GB/month</code></pre>
+
+          <h3>Network Bandwidth</h3>
+<pre><code>Download bandwidth:
+  400 pages/sec &times; 500 KB/page = 200 MB/sec
+  = 1.6 Gbps sustained
+
+  Peak (3x): ~4.8 Gbps
+
+DNS traffic:
+  400 lookups/sec &times; ~200 bytes/lookup = negligible
+
+Outbound (HTTP requests):
+  400 requests/sec &times; ~500 bytes/request = negligible</code></pre>
+
+          <div class="info-box note">
+            <strong>Key Insight:</strong> The numbers reveal two critical bottlenecks: (1) <strong>DNS resolution</strong> &mdash; at 400 pages/sec, DNS lookups add up to 80 seconds of cumulative latency per second without caching. A local DNS cache with pre-fetching is essential. (2) <strong>URL frontier management</strong> &mdash; at 20,000 new URLs discovered per second, the URL deduplication system must handle extremely high write throughput. A Bloom filter is the right data structure here &mdash; it provides O(1) membership checks with minimal memory. The actual page download bandwidth (1.6 Gbps) is manageable with modern infrastructure.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- HIGH-LEVEL DESIGN -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="high-level-design"></span>
+        <section class="section">
+          <h2>3. High-Level Design</h2>
+
+          <p>The web crawler follows a loop architecture: URLs are pulled from a frontier, pages are downloaded and parsed, new URLs are extracted and filtered, and novel URLs are fed back into the frontier. The key challenge is making this loop distributed, polite, and resilient to traps and duplicates.</p>
+
+          <h3>Crawl Loop Architecture</h3>
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    Seed["Seed URLs\ngoogle.com, wikipedia.org, github.com"]
+    Frontier["URL FRONTIER\nPriority Queue (front)\nPoliteness Queue (back)"]
+    Downloader["HTML DOWNLOADER\nMulti-threaded, Connection pooling,\nTimeout handling, robots.txt check"]
+    DNS["DNS RESOLVER\nLocal cache + pre-fetch"]
+    Robots["robots.txt CACHE\nPer-domain, cached 24h"]
+    Parser["CONTENT PARSER\nExtract text &amp; metadata\nHandle malformed HTML"]
+    ContentCheck{"CONTENT SEEN?\nSimHash / MinHash"}
+    ContentDiscard["Discard (dedup)"]
+    Storage["CONTENT STORAGE\nStore page + metadata"]
+    LinkExtractor["LINK EXTRACTOR\nExtract links, Normalize URLs,\nResolve relative URLs"]
+    URLFilter{"URL FILTER\nBlocklist, Invalid schemes,\nSpider trap patterns"}
+    FilterDiscard["Discard"]
+    URLCheck{"URL SEEN?\nBloom Filter"}
+    URLDiscard["Discard (dedup)"]
+
+    Seed --> Frontier
+    Frontier --> Downloader
+    Downloader --> DNS
+    Downloader --> Robots
+    Downloader --> Parser
+    Parser --> ContentCheck
+    ContentCheck -- YES --> ContentDiscard
+    ContentCheck -- NO --> Storage
+    Storage --> LinkExtractor
+    LinkExtractor --> URLFilter
+    URLFilter -- BAD --> FilterDiscard
+    URLFilter -- PASS --> URLCheck
+    URLCheck -- YES --> URLDiscard
+    URLCheck -- NO --> Frontier
+          </div></div>
+
+          <h3>Crawl Flow (Single Page)</h3>
+          <div class="flow-container">
+            <div class="flow-box">URL Frontier dequeues next URL</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Check robots.txt (cached)</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">DNS resolve &amp; HTTP download</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Parse HTML &amp; check content dedup</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">Store content &amp; extract links</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Filter &amp; dedup URLs &rarr; add to Frontier</div>
+          </div>
+
+          <h3>Key Components</h3>
+          <ul class="content-list">
+            <li><strong>Seed URLs:</strong> The initial set of URLs that bootstrap the crawl. Typically high-authority domains (google.com, wikipedia.org, dmoz.org). The quality and diversity of seed URLs determines how quickly the crawler discovers the broader web.</li>
+            <li><strong>URL Frontier:</strong> The most critical component. A two-level queue system that manages which URL to crawl next. The front queues handle <strong>priority</strong> (important pages first), and the back queues handle <strong>politeness</strong> (one queue per host, rate-limited). This is the brain of the crawler.</li>
+            <li><strong>HTML Downloader:</strong> Multi-threaded HTTP client that fetches pages. Uses connection pooling, configurable timeouts, and retry logic. Checks robots.txt before every download. Handles redirects (up to 10 hops) and various HTTP status codes.</li>
+            <li><strong>DNS Resolver:</strong> Resolves hostnames to IP addresses. DNS is a major bottleneck &mdash; each lookup takes 10&ndash;200 ms. Uses a local DNS cache and pre-fetches DNS for URLs in the frontier to eliminate lookup latency from the critical path.</li>
+            <li><strong>Content Parser:</strong> Extracts text, metadata, and structure from HTML. Must handle malformed HTML gracefully (use a lenient parser like jsoup or BeautifulSoup, not a strict XML parser).</li>
+            <li><strong>Content Deduplication:</strong> Uses SimHash or MinHash to detect near-duplicate pages. Exact duplicates are caught by content hash (SHA-256). Near-duplicates (e.g., same article with different ads) are caught by fingerprinting algorithms. Prevents wasting storage and crawl budget on redundant content.</li>
+            <li><strong>Link Extractor:</strong> Extracts all hyperlinks from parsed HTML, normalizes them (resolve relative URLs, remove fragments, canonicalize query parameters), and passes them to the URL filter.</li>
+            <li><strong>URL Filter:</strong> Removes unwanted URLs: blocklisted domains, non-HTTP schemes (mailto:, javascript:), known spider trap patterns, and URLs exceeding maximum depth.</li>
+            <li><strong>URL Deduplication (Bloom Filter):</strong> A space-efficient probabilistic data structure that tracks which URLs have already been crawled or are in the frontier. At 1 billion URLs, a Bloom filter uses only ~1.2 GB of memory with a 1% false positive rate.</li>
+          </ul>
+
+          <div class="info-box important">
+            <strong>The URL Frontier Is the Key Component.</strong> In an interview, the URL Frontier is what separates a good answer from a great one. It must solve two competing goals simultaneously: (1) <strong>Priority</strong> &mdash; crawl important pages first (PageRank, freshness, domain authority). (2) <strong>Politeness</strong> &mdash; don&rsquo;t hammer any single domain. These goals conflict: the highest-priority pages might all be on the same domain (e.g., wikipedia.org), but politeness requires spacing out requests to that domain. The two-level queue architecture (front queues for priority, back queues for politeness) elegantly resolves this tension.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- DEEP DIVE -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="deep-dive"></span>
+        <section class="section">
+          <h2>4. Deep Dive</h2>
+
+          <!-- 4a. URL Frontier -->
+          <h3>4a. URL Frontier &mdash; The Brain of the Crawler</h3>
+          <p>The URL Frontier is a two-level queue system that determines the crawl order. The front queues manage <strong>priority</strong> (which URLs are most important) and the back queues manage <strong>politeness</strong> (rate limiting per domain). This is the most important component to get right in an interview.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    subgraph Front["FRONT QUEUES (Priority)"]
+        F1["Queue F1 (Highest)\nwikipedia.org, google.com, github.com"]
+        F2["Queue F2 (High)\nnytimes.com, bbc.co.uk"]
+        F3["Queue F3 (Medium)\nblogs, forums"]
+        F4["Queue F4 (Low)\nrandom, obscure sites"]
+    end
+
+    Prio["Prioritizer\nWeighted round-robin\nF1: 40%, F2: 30%, F3: 20%, F4: 10%"]
+
+    Router["ROUTER\nhash(hostname) % num_back_queues"]
+
+    subgraph Back["BACK QUEUES (Politeness)"]
+        B1["Queue B1: wikipedia.org\nrate: 1 req/sec"]
+        B2["Queue B2: github.com\nrate: 1 req/sec"]
+        B3["Queue B3: nytimes.com\nrate: 0.5 req/sec"]
+        BN["Queue BN: small-blog.net\nrate: 1 req/3sec"]
+    end
+
+    Selector["Queue Selector\nMin-heap by next_allowed_fetch"]
+    Downloader2["HTML DOWNLOADER\nfetch page"]
+
+    Front --> Prio --> Router
+    Router --> Back
+    Back --> Selector --> Downloader2
+          </div></div>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> When explaining the URL Frontier, say: &ldquo;The frontier has two levels. The front queues handle priority &mdash; I assign URLs to queues based on PageRank, freshness, and depth. The back queues handle politeness &mdash; each back queue maps to exactly one hostname and has a rate limiter. A router connects the two: when a URL is dequeued from a front queue, it is placed into the appropriate host&rsquo;s back queue. The queue selector then picks the back queue whose rate limit has expired. This ensures we crawl important pages first while never hammering any single server.&rdquo;
+          </div>
+
+          <!-- 4b. HTML Downloader -->
+          <h3>4b. HTML Downloader &mdash; Fetching Pages at Scale</h3>
+          <p>The HTML Downloader is the workhorse of the crawler. It must handle hundreds of concurrent HTTP connections, respect robots.txt, manage timeouts, and deal with the messy reality of the web (broken servers, slow responses, unexpected content types).</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    subgraph DownloaderBox["HTML DOWNLOADER"]
+        TP["THREAD POOL (200 threads)"]
+        CP["CONNECTION POOL\nHTTP keep-alive reuse"]
+        RCache["ROBOTS.TXT CACHE\nPer-domain, 24h TTL\n~10M domains, ~20 GB"]
+        TO["TIMEOUT &amp; RETRY\nConnect: 5s, Read: 30s\nMax retries: 3, Max redirects: 10\nMax page size: 10 MB"]
+    end
+
+    URLIn["URL dequeued from frontier"]
+    CheckRobots{"Check robots.txt\ncache"}
+    SkipRobots["SKIP"]
+    DNSResolve{"DNS resolve\n(check cache)"}
+    RetryDNS["RETRY or SKIP\nafter 3 tries"]
+    HTTPGet{"HTTP GET\n(with timeout)"}
+    HandleErr["Timeout → RETRY\n5xx → RETRY\n4xx → SKIP\nRedirect → FOLLOW"]
+    CheckType{"Check\nContent-Type"}
+    SkipType["SKIP\n(not HTML)"]
+    Parser2["Pass to Content Parser"]
+
+    URLIn --> CheckRobots
+    CheckRobots -- Disallowed --> SkipRobots
+    CheckRobots -- Allowed --> DNSResolve
+    DNSResolve -- Failure --> RetryDNS
+    DNSResolve -- Resolved --> HTTPGet
+    HTTPGet -- Error --> HandleErr
+    HTTPGet -- 200 OK --> CheckType
+    CheckType -- Not HTML --> SkipType
+    CheckType -- text/html --> Parser2
+          </div></div>
+
+          <!-- 4c. DNS Resolver -->
+          <h3>4c. DNS Resolver &mdash; Eliminating the Bottleneck</h3>
+          <p>DNS resolution is one of the most underestimated bottlenecks in web crawling. Each lookup takes 10&ndash;200 ms, and at 400 pages/sec, this adds up fast. Without caching, DNS alone would consume more time than the actual page downloads.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    subgraph DNSBox["DNS RESOLVER"]
+        Cache["LOCAL DNS CACHE\nIn-memory hash map\nhostname → IP, TTL, timestamp\n~10M domains × 100 bytes = ~1 GB\nHit rate: ~90%\nEviction: LRU with TTL expiry"]
+        PreFetch["DNS PRE-FETCHER\nBackground thread\nPeeks at next N URLs in frontier\nExtracts unique hostnames\nResolves hostnames not in cache\nPopulates cache before dequeue"]
+    end
+
+    URLQueue["URL Frontier\n(upcoming URLs)"]
+    Peek["Peek at next N URLs"]
+    Extract["Extract unique hostnames"]
+    Resolve["DNS lookup\n(background)"]
+    Populate["Populate cache"]
+    Dequeue["URL dequeued"]
+    CacheHit{"Cache hit?"}
+    ZeroLatency["Zero latency\n(already resolved)"]
+    Realtime["Real-time DNS lookup\n(10-200ms)"]
+    Download["HTML Downloader"]
+
+    URLQueue --> Peek --> Extract --> Resolve --> Populate --> Cache
+    Dequeue --> CacheHit
+    CacheHit -- Yes --> ZeroLatency --> Download
+    CacheHit -- No --> Realtime --> Download
+    Cache --> CacheHit
+          </div></div>
+
+          <!-- 4d. Content Deduplication -->
+          <h3>4d. Content Deduplication &mdash; SimHash and MinHash</h3>
+          <p>The web is full of duplicate and near-duplicate content: syndicated articles, scraped content, boilerplate pages, and pages that differ only in ads or navigation. Crawling and storing duplicates wastes both crawl budget and storage. Content deduplication catches these at two levels.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    PageIn["Parsed page content"]
+    SHA["LEVEL 1: SHA-256 Hash\nCompute content hash\n(after stripping dynamic elements)"]
+    ExactCheck{"Exact\nmatch?"}
+    ExactDiscard["Discard\n(exact duplicate)"]
+    SimHash["LEVEL 2: SimHash Fingerprint\n64-bit fingerprint\nTokenize → Hash tokens →\nSum bit positions → Threshold"]
+    HamCheck{"Hamming\ndistance ≤ 3?"}
+    NearDiscard["Discard\n(near-duplicate)"]
+    Keep["Keep page\nUnique content"]
+
+    PageIn --> SHA --> ExactCheck
+    ExactCheck -- Yes --> ExactDiscard
+    ExactCheck -- No --> SimHash --> HamCheck
+    HamCheck -- Yes --> NearDiscard
+    HamCheck -- No --> Keep
+          </div></div>
+
+          <!-- 4e. URL Deduplication -->
+          <h3>4e. URL Deduplication &mdash; Bloom Filter</h3>
+          <p>With 20,000 new URLs discovered per second, the crawler needs a fast, space-efficient way to check if a URL has already been crawled or is already in the frontier. A Bloom filter is the ideal data structure for this.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    NewURL["New URL discovered"]
+    Hash["Apply k=7 hash functions\nh1, h2, ..., h7"]
+    BitSet["Bloom Filter\nBit array: ~9.6 billion bits (1.2 GB)\nm = -(n × ln(p)) / (ln 2)²"]
+    Check{"All k bits\nset to 1?"}
+    Skip["PROBABLY seen\nSkip URL"]
+    Insert["Definitely NOT seen\nSet k bits to 1\nAdd URL to frontier"]
+
+    NewURL --> Hash --> Check
+    Check -- Yes --> Skip
+    Check -- No --> Insert
+    Insert --> BitSet
+          </div></div>
+
+          <div class="info-box note">
+            <strong>Key Insight:</strong> The Bloom filter&rsquo;s false positives mean that ~1% of genuinely new URLs will be incorrectly skipped. For a web crawler, this is perfectly acceptable &mdash; the web is highly interconnected, and any important page will be discovered via multiple link paths. The 80x memory savings (1.2 GB vs. 100 GB) far outweigh the cost of occasionally missing a URL. If zero false positives are required, use a hash set backed by disk (e.g., RocksDB), but this is slower and unnecessary for most crawlers.
+          </div>
+
+          <!-- 4f. Spider Trap Detection -->
+          <h3>4f. Spider Trap Detection &mdash; Avoiding Infinite Crawls</h3>
+          <p>Spider traps are pages that generate an infinite (or near-infinite) number of URLs, causing the crawler to waste resources crawling the same site endlessly. They can be malicious (designed to trap crawlers) or accidental (poorly designed websites).</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    URL["URL to evaluate"]
+    D1{"Path depth\n> 15?"}
+    R1["REJECT"]
+    D2{"Domain page\ncount > 10,000?"}
+    R2["THROTTLE"]
+    D3{"Repetitive\nURL pattern?"}
+    R3["THROTTLE\n(>100 matching URLs)"]
+    D4{"Near-identical\ncontent from domain?"}
+    R4["REDUCE PRIORITY\n(SimHash distance ≤ 3)"]
+    D5{"URL length\n> 2048 chars?"}
+    R5["REJECT"]
+    D6{"On manual\nblocklist?"}
+    R6["REJECT"]
+    Pass["PASS\nCrawl URL"]
+
+    URL --> D1
+    D1 -- Yes --> R1
+    D1 -- No --> D2
+    D2 -- Yes --> R2
+    D2 -- No --> D3
+    D3 -- Yes --> R3
+    D3 -- No --> D4
+    D4 -- Yes --> R4
+    D4 -- No --> D5
+    D5 -- Yes --> R5
+    D5 -- No --> D6
+    D6 -- Yes --> R6
+    D6 -- No --> Pass
+          </div></div>
+
+          <!-- 4g. Crawl Priority -->
+          <h3>4g. Crawl Priority &mdash; What to Crawl First</h3>
+          <p>Not all pages are equally important. The crawler must prioritize pages that are more valuable to the downstream consumers (search engine, analytics, etc.). Priority determines which front queue a URL is assigned to.</p>
+
+          <div class="comparison-grid">
+            <div class="comparison-card">
+              <h4>Priority Signals</h4>
+<pre><code>1. PageRank / Domain Authority
+   High-authority domains (wikipedia.org,
+   github.com) get higher priority.
+   Computed offline from the link graph.
+
+2. Freshness / Change Frequency
+   Pages that change often (news sites,
+   stock prices) need frequent recrawling.
+   Track last-modified headers and
+   historical change rates.
+
+3. Depth from Seed URL
+   Pages closer to seed URLs (fewer hops)
+   tend to be more important. Homepage
+   (depth 0) > subpage (depth 3).
+
+4. Content Type
+   HTML pages > PDF > images > other.
+   Prioritize content that yields the
+   most links for further discovery.
+
+5. Recrawl Scheduling
+   Previously crawled pages are re-added
+   to the frontier with priority based on
+   their expected change frequency:
+   • News sites: recrawl every hour
+   • Blogs: recrawl every day
+   • Static pages: recrawl every week</code></pre>
+            </div>
+            <div class="comparison-card">
+              <h4>Priority Assignment</h4>
+<pre><code>Priority score = weighted combination:
+
+score = w1 × pagerank_score
+      + w2 × freshness_score
+      + w3 × depth_score
+      + w4 × content_type_score
+
+Example weights:
+  w1 = 0.4  (PageRank is most important)
+  w2 = 0.3  (freshness matters for news)
+  w3 = 0.2  (prefer shallow pages)
+  w4 = 0.1  (prefer HTML over other)
+
+Front queue assignment:
+  score > 0.8  → Queue F1 (highest)
+  score > 0.5  → Queue F2 (high)
+  score > 0.2  → Queue F3 (medium)
+  score ≤ 0.2  → Queue F4 (low)
+
+Queue selection uses weighted
+round-robin:
+  F1 gets 40% of dequeue operations
+  F2 gets 30%
+  F3 gets 20%
+  F4 gets 10%
+
+This ensures low-priority pages are
+still crawled, just less frequently.</code></pre>
+            </div>
+          </div>
+
+          <!-- 4h. Distributed Crawling -->
+          <h3>4h. Distributed Crawling &mdash; Scaling Horizontally</h3>
+          <p>A single machine cannot crawl 400 pages/sec sustainably. The crawler must be distributed across multiple nodes, with each node responsible for a subset of domains. Consistent hashing ensures even distribution and graceful handling of node failures.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    subgraph HashRing["CONSISTENT HASH RING"]
+        N1["Crawler Node 1\nwikipedia, reddit, ..."]
+        N2["Crawler Node 2\ngithub, stackoverflow, ..."]
+        N3["Crawler Node 3\nnytimes, bbc, ..."]
+    end
+
+    URLRouter["URL Router\nhash(domain) → node"]
+    subgraph Shared["SHARED COMPONENTS"]
+        Frontier2["URL Frontier\nRedis / Kafka"]
+        BF["Bloom Filter\n(distributed)"]
+        Store["Content Store\nS3 / HDFS"]
+        Meta["Metadata DB\nstatus, timestamps"]
+        Coord["Coordination\nZooKeeper / etcd"]
+    end
+
+    URLRouter --> N1
+    URLRouter --> N2
+    URLRouter --> N3
+    N1 --> Shared
+    N2 --> Shared
+    N3 --> Shared
+          </div></div>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> When discussing distributed crawling, emphasize why domain-based partitioning is the right choice: &ldquo;We partition URLs by domain hash so that all URLs for a given domain go to the same crawler node. This gives us three things for free: (1) politeness enforcement is local to each node &mdash; no distributed coordination needed for rate limiting, (2) robots.txt and DNS caches are per-node with high hit rates, and (3) HTTP connections to the same host can be reused via keep-alive. We use consistent hashing so that when a node fails, only its domains are redistributed, and the other nodes are unaffected.&rdquo;
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- TRADE-OFFS -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="tradeoffs"></span>
+        <section class="section">
+          <h2>5. Trade-offs</h2>
+
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Decision</th>
+                  <th>Option A</th>
+                  <th>Option B</th>
+                  <th>Recommendation</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>BFS vs. DFS traversal</strong></td>
+                  <td><strong>BFS (Breadth-First):</strong> Explores all pages at depth N before moving to depth N+1. Discovers high-level pages first (homepages, category pages). More URLs in the frontier at any time (higher memory). Better for general-purpose crawling &mdash; finds the most important pages quickly.</td>
+                  <td><strong>DFS (Depth-First):</strong> Follows links deeply into a single site before backtracking. Lower memory usage (smaller frontier). Risk of getting trapped in deep link chains. Better for focused crawling of a single site. Misses breadth of the web.</td>
+                  <td>Use <strong>BFS</strong> for general-purpose crawling. BFS naturally discovers high-authority pages first (homepages are at depth 0-1) and provides better coverage of the web. The higher memory cost is manageable with the URL Frontier&rsquo;s disk-backed queues. DFS is only appropriate for focused crawlers targeting a single domain.</td>
+                </tr>
+                <tr>
+                  <td><strong>Politeness vs. speed</strong></td>
+                  <td><strong>Aggressive crawling:</strong> No per-domain rate limits. Maximum throughput. Risks getting IP-banned by web servers. Violates web etiquette. Can cause denial-of-service on small servers. Faster crawl completion.</td>
+                  <td><strong>Polite crawling:</strong> Strict per-domain rate limits (1 req/sec). Slower overall throughput per domain. Respects server capacity. Maintains good reputation. Required for long-term crawling operations.</td>
+                  <td>Always be <strong>polite</strong>. Rate limit to 1 request per second per domain (or respect <code>Crawl-delay</code> in robots.txt). Compensate for per-domain slowness by crawling many domains in parallel. With 10M domains and 1 req/sec/domain, the theoretical max is 10M pages/sec &mdash; far more than our 400 pages/sec target. Politeness does not limit aggregate throughput.</td>
+                </tr>
+                <tr>
+                  <td><strong>Bloom filter false positives</strong></td>
+                  <td><strong>Low false positive rate (0.1%):</strong> Uses ~1.8 GB for 1B URLs. Very few URLs incorrectly skipped. Higher memory cost. 10 hash functions per lookup (more CPU).</td>
+                  <td><strong>Higher false positive rate (1%):</strong> Uses ~1.2 GB for 1B URLs. ~1% of new URLs incorrectly skipped. Lower memory cost. 7 hash functions per lookup (less CPU).</td>
+                  <td>Use <strong>1% false positive rate</strong>. The web is highly interconnected &mdash; any important page will be discovered via multiple link paths. Losing 1% of URLs is negligible. The 600 MB memory savings and reduced CPU per lookup are worthwhile. If a critical page is missed, it will be found on the next crawl cycle or via a different link path.</td>
+                </tr>
+                <tr>
+                  <td><strong>Store raw HTML vs. parsed content</strong></td>
+                  <td><strong>Raw HTML:</strong> Store the complete HTML as downloaded. Preserves all information. Allows re-parsing with improved parsers later. Higher storage cost (500 KB/page avg). Useful for debugging and auditing.</td>
+                  <td><strong>Parsed content only:</strong> Store only extracted text, metadata, and links. Much smaller storage footprint (~50 KB/page). Loses original HTML structure. Cannot re-parse if parser improves. Faster downstream processing.</td>
+                  <td>Store <strong>both</strong>. Raw HTML goes to cold storage (S3 with infrequent access tier, compressed). Parsed content goes to hot storage for immediate use by downstream systems (search indexer, analytics). The raw HTML is insurance &mdash; when you improve your parser (and you will), you can re-process the raw HTML without re-crawling. Storage is cheap; re-crawling is expensive.</td>
+                </tr>
+                <tr>
+                  <td><strong>URL dedup: Bloom filter vs. hash set</strong></td>
+                  <td><strong>Bloom filter:</strong> 1.2 GB for 1B URLs. O(1) lookup. Probabilistic (1% false positives). Cannot enumerate stored URLs. Cannot delete entries. Simple and fast.</td>
+                  <td><strong>Disk-backed hash set (RocksDB):</strong> ~100 GB for 1B URLs. O(1) amortized lookup. Exact (zero false positives). Can enumerate and delete entries. More complex, slower (disk I/O).</td>
+                  <td>Use <strong>Bloom filter</strong> for the primary URL dedup check (fast, memory-efficient). Supplement with a disk-backed store (RocksDB) for the canonical URL set if you need to enumerate crawled URLs or support URL deletion. The Bloom filter handles the hot path (20,000 URL checks/sec); the disk store handles cold queries.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> When discussing trade-offs, connect them to the requirements: &ldquo;We chose BFS over DFS because our goal is general-purpose crawling of 1 billion pages across the entire web, not deep crawling of a single site. BFS discovers high-authority pages first, which aligns with our priority system. We chose polite crawling because aggressive crawling gets us IP-banned, which would reduce our effective throughput to zero for those domains. Politeness is not just ethical &mdash; it is a practical requirement for sustained crawling. We chose a 1% Bloom filter false positive rate because the web&rsquo;s link redundancy means any important page will be discovered via multiple paths.&rdquo;
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- REVISION CHECKLIST -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="revision"></span>
+        <section class="section">
+          <h2>6. Revision Checklist</h2>
+          <p>Use this checklist to verify you can recall the key concepts before your interview.</p>
+
+          <div class="checklist">
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Crawl loop architecture:</strong> Seed URLs &rarr; URL Frontier &rarr; HTML Downloader &rarr; Content Parser &rarr; Content Dedup (SimHash) &rarr; Link Extractor &rarr; URL Filter &rarr; URL Dedup (Bloom Filter) &rarr; back to URL Frontier. This loop is the backbone of the entire system. Every component feeds into the next.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>URL Frontier is the key component</strong> with a two-level queue design: front queues handle priority (PageRank, freshness, depth) using weighted round-robin, and back queues handle politeness (one queue per host with rate limiting). The router maps URLs from front queues to the correct host&rsquo;s back queue. This resolves the tension between &ldquo;crawl important pages first&rdquo; and &ldquo;don&rsquo;t overload any server.&rdquo;</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Politeness is non-negotiable:</strong> Rate limit to 1 request per second per domain. Respect robots.txt (cache it per domain for 24 hours). Use a descriptive User-Agent. Politeness does not limit aggregate throughput &mdash; with 10M domains, the theoretical max is 10M pages/sec. Compensate by crawling many domains in parallel.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>DNS is a critical bottleneck:</strong> At 400 pages/sec, DNS adds 40 seconds of cumulative latency per second without caching. Solution: local DNS cache (~1 GB, 90% hit rate) plus a background DNS pre-fetcher that resolves hostnames for upcoming URLs in the frontier before they are dequeued.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Content deduplication uses SimHash:</strong> A 64-bit fingerprint per page where similar documents have similar fingerprints (small Hamming distance). If distance &le; 3 bits, pages are near-duplicates. Catches ~30% of crawled pages as duplicates. Exact duplicates are caught by SHA-256 content hash. SimHash is preferred over MinHash for web crawling (single fingerprint, fast comparison).</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>URL deduplication uses a Bloom filter:</strong> 1.2 GB for 1 billion URLs with 1% false positive rate and 7 hash functions. No false negatives (a crawled URL is never reported as &ldquo;not crawled&rdquo;). The 1% false positive rate is acceptable because the web&rsquo;s link redundancy means important pages are discovered via multiple paths.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Spider trap detection</strong> uses multiple strategies: max URL depth (15 segments), max pages per domain (10,000), URL pattern detection (identify repetitive URL structures), content similarity checks (many near-identical pages from one domain), URL length limits (2048 chars), and manual blocklists for known traps.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Distributed crawling</strong> partitions URLs by domain hash using consistent hashing. Each crawler node handles specific domains, giving it local control over politeness, robots.txt caching, DNS caching, and HTTP connection reuse. Node failures are handled by consistent hashing redistributing domains to surviving nodes.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Storage strategy:</strong> Store both raw HTML (cold storage, S3 infrequent access, compressed) and parsed content (hot storage for downstream systems). Raw HTML is insurance for re-processing with improved parsers. At 500 KB/page and 1B pages/month, raw storage is 500 TB/month (100 TB compressed, 70 TB after dedup).</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Scale numbers:</strong> 1B pages/month = 400 pages/sec. 500 TB/month raw storage. 20,000 new URLs discovered/sec. 1.6 Gbps download bandwidth. ~8 crawler nodes at 50 pages/sec each. Bloom filter: 1.2 GB. DNS cache: ~1 GB. robots.txt cache: ~20 GB. The system scales linearly by adding crawler nodes to the consistent hash ring.</span>
+            </label>
+          </div>
+        </section>
+
+        <!-- Bottom nav -->
+        <div class="problem-nav">
+          <a href="google-drive.html"><span class="nav-label">Previous</span><span class="nav-title">Google Drive</span></a>
+          <a href="nearby-friends.html" class="next"><span class="nav-label">Next</span><span class="nav-title">Nearby Friends</span></a>
+        </div>
+      </div>
+    </div>
+  </main>
+  <script src="../js/app.js"></script>
+</body>
+</html>

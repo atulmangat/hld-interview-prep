@@ -1,0 +1,766 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Design URL Shortener (TinyURL) — HLD Interview Prep</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+  <nav class="top-nav">
+    <div class="top-nav-inner">
+      <a href="../index.html" class="nav-logo">
+        <div class="nav-logo-icon">SD</div>
+        <span>HLD Interview Prep</span>
+      </a>
+      <div class="nav-actions">
+        <div class="nav-breadcrumb">
+          <a href="../index.html">Home</a>
+          <span class="separator">/</span>
+          <span class="current">URL Shortener</span>
+        </div>
+        <button class="theme-toggle" id="theme-toggle">&#x263E;</button>
+      </div>
+    </div>
+  </nav>
+  <div class="scroll-progress"></div>
+
+  <main class="main-content">
+    <div class="problem-page">
+      <!-- Sidebar TOC -->
+      <aside class="sidebar">
+        <div class="sidebar-title">On This Page</div>
+        <ul class="toc-list">
+          <li><a href="#requirements">Requirements</a></li>
+          <li><a href="#estimation">Estimation</a></li>
+          <li><a href="#api-design">API Design</a></li>
+          <li><a href="#data-model">Data Model</a></li>
+          <li><a href="#high-level-design">High-Level Design</a></li>
+          <li><a href="#deep-dive">Deep Dive</a></li>
+          <li><a href="#tradeoffs">Trade-offs</a></li>
+          <li><a href="#revision">Revision Checklist</a></li>
+        </ul>
+        <div class="progress-bar"><div class="progress-fill" style="width: 0%"></div></div>
+      </aside>
+
+      <div class="problem-content">
+        <!-- Header -->
+        <div class="problem-header">
+          <h1>Design URL Shortener (TinyURL)</h1>
+          <p class="problem-subtitle">Design a highly available service that converts long URLs into short, unique aliases and redirects users with minimal latency.</p>
+          <div class="problem-meta-bar">
+            <span class="meta-badge difficulty-medium">Medium</span>
+            <span class="meta-badge">URL / Web Infrastructure</span>
+            <span class="meta-badge">Asked at: Google, Amazon, Meta, Microsoft, Bloomberg, Uber</span>
+          </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- REQUIREMENTS -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="requirements"></span>
+        <section class="section">
+          <h2>1. Requirements</h2>
+
+          <h3>Functional Requirements</h3>
+          <ul>
+            <li><strong>Shorten URL:</strong> Given a long URL, generate a unique, short alias (e.g., <code>https://tiny.url/a1B2c3D</code>).</li>
+            <li><strong>Redirect:</strong> When a user visits the short URL, redirect them to the original long URL.</li>
+            <li><strong>Custom Alias:</strong> Users can optionally provide a custom short key (e.g., <code>/my-brand-link</code>). The system must validate uniqueness.</li>
+            <li><strong>Expiration:</strong> URLs can have an optional TTL. Expired URLs return 404. Default expiration is 5 years.</li>
+            <li><strong>Analytics (optional):</strong> Track click count, referrer, geo-location, and device type per short URL.</li>
+            <li><strong>Delete URL:</strong> Authenticated users can delete their own short URLs.</li>
+          </ul>
+
+          <h3>Non-Functional Requirements</h3>
+          <ul>
+            <li><strong>High Availability:</strong> The redirect path is read-heavy and must be 99.99% available. Downtime = lost revenue for customers.</li>
+            <li><strong>Low Latency:</strong> Redirect (read path) must complete in &lt;100ms at p99. Users should not perceive any delay.</li>
+            <li><strong>Scale:</strong> Support 100 million new URLs created per day, with a 10:1 read-to-write ratio (1 billion redirects/day).</li>
+            <li><strong>Uniqueness:</strong> Every generated short key must be globally unique. Collisions are unacceptable — a collision means a user gets redirected to the wrong page.</li>
+            <li><strong>Durability:</strong> Once a URL mapping is created, it must not be lost. Data must survive hardware failures.</li>
+          </ul>
+
+          <div class="info-box">
+            <strong>Key Insight:</strong> The read-to-write ratio (10:1 or higher) is the single most important characteristic of this system. It means the redirect path must be hyper-optimized — this is why caching dominates the design. A cache hit on redirect avoids a database round-trip entirely, dropping p99 latency from ~10ms (DB) to &lt;1ms (Redis).
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- ESTIMATION -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="estimation"></span>
+        <section class="section">
+          <h2>2. Back-of-Envelope Estimation</h2>
+
+          <h3>Traffic</h3>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Metric</th>
+                  <th>Calculation</th>
+                  <th>Result</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>New URLs / day</td>
+                  <td>Given</td>
+                  <td>100 million</td>
+                </tr>
+                <tr>
+                  <td>Write QPS</td>
+                  <td>100M / 86,400</td>
+                  <td>~1,160 / sec</td>
+                </tr>
+                <tr>
+                  <td>Peak write QPS (2x)</td>
+                  <td>1,160 &times; 2</td>
+                  <td>~2,320 / sec</td>
+                </tr>
+                <tr>
+                  <td>Read:Write ratio</td>
+                  <td>Given</td>
+                  <td>10 : 1</td>
+                </tr>
+                <tr>
+                  <td>Read QPS</td>
+                  <td>1,160 &times; 10</td>
+                  <td>~11,600 / sec</td>
+                </tr>
+                <tr>
+                  <td>Peak read QPS (2x)</td>
+                  <td>11,600 &times; 2</td>
+                  <td>~23,200 / sec</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>Storage</h3>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Metric</th>
+                  <th>Calculation</th>
+                  <th>Result</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Avg record size</td>
+                  <td>short_key (7B) + long_url (256B) + metadata (~237B)</td>
+                  <td>~500 bytes</td>
+                </tr>
+                <tr>
+                  <td>Records / year</td>
+                  <td>100M &times; 365</td>
+                  <td>36.5 billion</td>
+                </tr>
+                <tr>
+                  <td>Storage / year</td>
+                  <td>36.5B &times; 500B</td>
+                  <td>~18.25 TB</td>
+                </tr>
+                <tr>
+                  <td>Storage over 5 years</td>
+                  <td>18.25 TB &times; 5</td>
+                  <td>~91 TB</td>
+                </tr>
+                <tr>
+                  <td>Total records (5 yr)</td>
+                  <td>36.5B &times; 5</td>
+                  <td>~182.5 billion</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>Short Key Length</h3>
+          <div class="info-box">
+            <strong>How many characters do we need?</strong> Using Base62 (a-z, A-Z, 0-9):
+            <br>62^6 = ~56.8 billion unique keys.
+            <br>62^7 = ~3.5 trillion unique keys.
+            <br>With 182.5 billion records over 5 years, <strong>7 characters</strong> gives us ample headroom (~19x the required space). This is the standard choice.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- API DESIGN -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="api-design"></span>
+        <section class="section">
+          <h2>3. API Design</h2>
+
+          <div class="api-endpoint">
+            <div class="api-method post">POST</div>
+            <div class="api-path">/api/v1/shorten</div>
+            <div class="api-desc">Create a new short URL from a long URL.</div>
+            <h4>Request Body</h4>
+<pre><code>{
+  "longUrl":     "https://www.example.com/very/long/path?query=abc",
+  "customAlias": "my-link",       // optional
+  "expireAt":    "2028-12-31T23:59:59Z"  // optional, default = now + 5 years
+}</code></pre>
+            <h4>Response — 201 Created</h4>
+<pre><code>{
+  "shortUrl":  "https://tiny.url/a1B2c3D",
+  "shortKey":  "a1B2c3D",
+  "longUrl":   "https://www.example.com/very/long/path?query=abc",
+  "expireAt":  "2028-12-31T23:59:59Z",
+  "createdAt": "2026-04-14T10:30:00Z"
+}</code></pre>
+            <h4>Error Codes</h4>
+            <ul>
+              <li><code>400</code> — Invalid URL format or custom alias contains disallowed characters.</li>
+              <li><code>409</code> — Custom alias already taken.</li>
+              <li><code>429</code> — Rate limit exceeded.</li>
+            </ul>
+          </div>
+
+          <div class="api-endpoint">
+            <div class="api-method get">GET</div>
+            <div class="api-path">/{shortKey}</div>
+            <div class="api-desc">Redirect to the original long URL. This is the hot path.</div>
+            <h4>Response</h4>
+            <ul>
+              <li><code>301</code> or <code>302</code> redirect with <code>Location: &lt;longUrl&gt;</code> header.</li>
+              <li><code>404</code> — Short key not found or URL has expired.</li>
+            </ul>
+<pre><code>HTTP/1.1 302 Found
+Location: https://www.example.com/very/long/path?query=abc
+Cache-Control: no-cache</code></pre>
+          </div>
+
+          <div class="api-endpoint">
+            <div class="api-method delete">DELETE</div>
+            <div class="api-path">/api/v1/urls/{shortKey}</div>
+            <div class="api-desc">Delete a short URL. Requires authentication.</div>
+            <h4>Headers</h4>
+<pre><code>Authorization: Bearer &lt;token&gt;</code></pre>
+            <h4>Response</h4>
+            <ul>
+              <li><code>204 No Content</code> — Successfully deleted.</li>
+              <li><code>401</code> — Unauthorized.</li>
+              <li><code>403</code> — Not the owner of this URL.</li>
+              <li><code>404</code> — Short key not found.</li>
+            </ul>
+          </div>
+
+          <div class="api-endpoint">
+            <div class="api-method get">GET</div>
+            <div class="api-path">/api/v1/urls/{shortKey}/stats</div>
+            <div class="api-desc">Retrieve analytics for a short URL (optional feature).</div>
+            <h4>Response — 200 OK</h4>
+<pre><code>{
+  "shortKey":   "a1B2c3D",
+  "totalClicks": 148230,
+  "createdAt":   "2026-04-14T10:30:00Z",
+  "lastAccessed":"2026-04-14T18:45:12Z"
+}</code></pre>
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- DATA MODEL -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="data-model"></span>
+        <section class="section">
+          <h2>4. Data Model</h2>
+
+          <h3>URL Mapping Table</h3>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Column</th>
+                  <th>Type</th>
+                  <th>Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>id</code></td>
+                  <td>BIGINT / UUID</td>
+                  <td>Primary key (auto-increment or Snowflake ID)</td>
+                </tr>
+                <tr>
+                  <td><code>short_key</code></td>
+                  <td>VARCHAR(16)</td>
+                  <td>The 7-char Base62 key. <strong>Unique index.</strong></td>
+                </tr>
+                <tr>
+                  <td><code>long_url</code></td>
+                  <td>VARCHAR(2048)</td>
+                  <td>Original URL</td>
+                </tr>
+                <tr>
+                  <td><code>user_id</code></td>
+                  <td>BIGINT</td>
+                  <td>Owner (nullable for anonymous creation)</td>
+                </tr>
+                <tr>
+                  <td><code>created_at</code></td>
+                  <td>TIMESTAMP</td>
+                  <td>Creation time</td>
+                </tr>
+                <tr>
+                  <td><code>expires_at</code></td>
+                  <td>TIMESTAMP</td>
+                  <td>Expiration time (nullable = never expires)</td>
+                </tr>
+                <tr>
+                  <td><code>click_count</code></td>
+                  <td>BIGINT</td>
+                  <td>Total redirects (denormalized counter)</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>SQL vs NoSQL</h3>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Criteria</th>
+                  <th>SQL (PostgreSQL / MySQL)</th>
+                  <th>NoSQL (DynamoDB / Cassandra)</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Access pattern</td>
+                  <td>Simple key-value lookups work fine</td>
+                  <td>Optimized for key-value access — ideal fit</td>
+                </tr>
+                <tr>
+                  <td>Scale</td>
+                  <td>Requires manual sharding at 182B records</td>
+                  <td>Horizontally scalable out of the box</td>
+                </tr>
+                <tr>
+                  <td>Schema flexibility</td>
+                  <td>Rigid schema, migrations needed</td>
+                  <td>Flexible, easy to add attributes</td>
+                </tr>
+                <tr>
+                  <td>Consistency</td>
+                  <td>Strong consistency (ACID)</td>
+                  <td>Eventual consistency (tunable in Cassandra)</td>
+                </tr>
+                <tr>
+                  <td>Joins / relations</td>
+                  <td>Supported but not needed here</td>
+                  <td>Not supported — not needed here</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="info-box">
+            <strong>Recommendation:</strong> NoSQL (DynamoDB or Cassandra) is the better fit. The access pattern is purely key-value (lookup by <code>short_key</code>), there are no joins, and horizontal scalability is critical at 182 billion records. DynamoDB with <code>short_key</code> as the partition key gives single-digit-millisecond reads at any scale. If you need strong consistency for custom alias uniqueness checks, DynamoDB supports strongly consistent reads.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- HIGH-LEVEL DESIGN -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="high-level-design"></span>
+        <section class="section">
+          <h2>5. High-Level Design</h2>
+
+          <h3>Architecture Overview</h3>
+          <div class="mermaid-container"><div class="mermaid">
+graph LR
+    C[Clients - Browser / App] --> LB[Load Balancer - ALB / Nginx]
+    LB --> APP1[App Server 1 - Stateless]
+    LB --> APPN[App Server N - Stateless]
+    APP1 --> CACHE[Cache Cluster - Redis]
+    APP1 --> IDGEN[ID Generator - ZooKeeper Counter]
+    APPN --> CACHE
+    APPN --> DB
+    CACHE -->|cache miss| DB[Database Cluster - DynamoDB / Cassandra]
+    APP1 --> DB
+    IDGEN --> APP1
+    IDGEN --> APPN
+          </div></div>
+
+          <h3>Write Flow — Creating a Short URL</h3>
+          <div class="flow-container">
+            <div class="flow-step">
+              <div class="flow-number">1</div>
+              <div class="flow-text"><strong>Client</strong> sends POST <code>/api/v1/shorten</code> with <code>longUrl</code> and optional <code>customAlias</code>.</div>
+            </div>
+            <div class="flow-step">
+              <div class="flow-number">2</div>
+              <div class="flow-text"><strong>Rate Limiter</strong> checks per-user or per-IP request rate. Rejects with 429 if exceeded.</div>
+            </div>
+            <div class="flow-step">
+              <div class="flow-number">3</div>
+              <div class="flow-text"><strong>Input Validation:</strong> Verify the URL is well-formed (valid scheme, reachable domain). Sanitize custom alias (alphanumeric, hyphens only, 3-30 chars).</div>
+            </div>
+            <div class="flow-step">
+              <div class="flow-number">4</div>
+              <div class="flow-text"><strong>Key Generation:</strong> If no custom alias, the app server requests a unique ID from the ID Generator, then converts it to a 7-character Base62 string.</div>
+            </div>
+            <div class="flow-step">
+              <div class="flow-number">5</div>
+              <div class="flow-text"><strong>Collision Check (if hashing):</strong> Query the DB for the generated key. If it exists, regenerate. With counter-based approaches, this step is unnecessary.</div>
+            </div>
+            <div class="flow-step">
+              <div class="flow-number">6</div>
+              <div class="flow-text"><strong>Persist:</strong> Write the mapping <code>(short_key, long_url, user_id, created_at, expires_at)</code> to the database.</div>
+            </div>
+            <div class="flow-step">
+              <div class="flow-number">7</div>
+              <div class="flow-text"><strong>Cache Warm:</strong> Optionally write the mapping to Redis so the first redirect is fast.</div>
+            </div>
+            <div class="flow-step">
+              <div class="flow-number">8</div>
+              <div class="flow-text"><strong>Response:</strong> Return 201 with the full short URL to the client.</div>
+            </div>
+          </div>
+
+          <h3>Read Flow — Redirecting a Short URL</h3>
+          <div class="flow-container">
+            <div class="flow-step">
+              <div class="flow-number">1</div>
+              <div class="flow-text"><strong>Client</strong> sends GET <code>/{shortKey}</code>. The load balancer routes to any app server.</div>
+            </div>
+            <div class="flow-step">
+              <div class="flow-number">2</div>
+              <div class="flow-text"><strong>Cache Lookup:</strong> App server queries Redis with <code>short_key</code>. On cache hit (~90%+ of requests), return 302 immediately. Latency: &lt;1ms.</div>
+            </div>
+            <div class="flow-step">
+              <div class="flow-number">3</div>
+              <div class="flow-text"><strong>Cache Miss &rarr; DB Lookup:</strong> Query the database by <code>short_key</code>. If found and not expired, populate the cache (TTL = 24h) and return 302.</div>
+            </div>
+            <div class="flow-step">
+              <div class="flow-number">4</div>
+              <div class="flow-text"><strong>Expiration Check:</strong> If <code>expires_at</code> is in the past, return 404 and optionally delete the cache entry.</div>
+            </div>
+            <div class="flow-step">
+              <div class="flow-number">5</div>
+              <div class="flow-text"><strong>Analytics (async):</strong> Fire-and-forget an event to a message queue (Kafka) with click metadata (timestamp, IP, user-agent, referrer). Do NOT block the redirect.</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- DEEP DIVE -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="deep-dive"></span>
+        <section class="section">
+          <h2>6. Deep Dive</h2>
+
+          <h3>6a. URL Shortening Approaches</h3>
+          <p>The core challenge is generating a unique 7-character key for each URL. There are three major approaches:</p>
+
+          <div class="comparison-grid">
+            <div class="comparison-card">
+              <h4>Approach 1: Hash + Collision Resolution</h4>
+              <p>Hash the long URL with MD5 or SHA-256, take the first 7 Base62 characters.</p>
+              <h5>How it works</h5>
+              <ol>
+                <li>Compute <code>MD5(longUrl)</code> &rarr; 128-bit hash.</li>
+                <li>Take the first 43 bits (enough for 7 Base62 chars).</li>
+                <li>Convert to Base62 &rarr; 7-char key.</li>
+                <li>Check DB for collision. If collision, append a counter to the input and re-hash.</li>
+              </ol>
+              <h5>Pros</h5>
+              <ul>
+                <li>Same long URL always produces the same short URL (deduplication for free).</li>
+                <li>No centralized counter or coordination needed.</li>
+              </ul>
+              <h5>Cons</h5>
+              <ul>
+                <li>Collision resolution adds latency and complexity (worst case: multiple DB reads).</li>
+                <li>Deduplication breaks if users want different expiration dates for the same URL.</li>
+              </ul>
+            </div>
+
+            <div class="comparison-card">
+              <h4>Approach 2: Base62 Counter (Pre-generated Range)</h4>
+              <p>Use a global auto-incrementing counter. Each app server pre-fetches a range of IDs.</p>
+              <h5>How it works</h5>
+              <ol>
+                <li>A centralized service (ZooKeeper / DB sequence) assigns ID ranges to each app server (e.g., Server A gets 1M-2M, Server B gets 2M-3M).</li>
+                <li>Each server increments locally within its range — no coordination per request.</li>
+                <li>Convert the integer ID to Base62 &rarr; 7-char key.</li>
+              </ol>
+              <h5>Pros</h5>
+              <ul>
+                <li><strong>Zero collisions</strong> — every ID is unique by construction.</li>
+                <li>No DB lookup needed before writing.</li>
+                <li>Very fast — local counter increment is O(1).</li>
+              </ul>
+              <h5>Cons</h5>
+              <ul>
+                <li>IDs are sequential — short URLs are predictable (security concern, can be mitigated with shuffling).</li>
+                <li>Range coordinator (ZooKeeper) is a dependency that must be highly available.</li>
+                <li>If a server crashes, unused IDs in its range are wasted (acceptable at this scale).</li>
+              </ul>
+            </div>
+
+            <div class="comparison-card">
+              <h4>Approach 3: Snowflake ID</h4>
+              <p>Use Twitter's Snowflake-style 64-bit ID: timestamp + datacenter + machine + sequence.</p>
+              <h5>How it works</h5>
+              <ol>
+                <li>Generate a 64-bit Snowflake ID (41 bits timestamp, 5 bits datacenter, 5 bits machine, 12 bits sequence).</li>
+                <li>Convert to Base62 &rarr; produces an 11-char string. Truncate or use as-is.</li>
+              </ol>
+              <h5>Pros</h5>
+              <ul>
+                <li>Globally unique without coordination.</li>
+                <li>Time-sortable — useful for analytics.</li>
+                <li>Battle-tested at Twitter scale.</li>
+              </ul>
+              <h5>Cons</h5>
+              <ul>
+                <li>Produces longer keys (11 chars vs 7) unless truncated (which risks collisions).</li>
+                <li>Clock skew across machines can cause issues.</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="info-box">
+            <strong>Recommended approach:</strong> Base62 Counter with pre-generated ranges. It guarantees zero collisions, requires no DB read before write, and is the simplest to reason about. Use ZooKeeper or a lightweight coordination service to assign ranges. This is the approach used by production URL shorteners.
+          </div>
+
+          <h3>6b. 301 vs 302 Redirects</h3>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Aspect</th>
+                  <th>301 (Moved Permanently)</th>
+                  <th>302 (Found / Temporary)</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Browser caching</td>
+                  <td>Browser caches the redirect. Subsequent visits bypass your server entirely.</td>
+                  <td>Browser does NOT cache. Every visit hits your server.</td>
+                </tr>
+                <tr>
+                  <td>Server load</td>
+                  <td>Lower — browsers handle repeat visits locally.</td>
+                  <td>Higher — every click goes through your infrastructure.</td>
+                </tr>
+                <tr>
+                  <td>Analytics</td>
+                  <td>You lose visibility after the first click per browser.</td>
+                  <td>You see every single click — essential for analytics.</td>
+                </tr>
+                <tr>
+                  <td>SEO</td>
+                  <td>Search engines transfer link equity to the destination URL.</td>
+                  <td>Link equity stays with the short URL.</td>
+                </tr>
+                <tr>
+                  <td>Use when</td>
+                  <td>The mapping is permanent and analytics are not needed.</td>
+                  <td>You need click tracking, A/B testing, or the destination may change.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="info-box">
+            <strong>Recommendation:</strong> Use <strong>302</strong> by default. Most URL shortener use cases require analytics (click tracking), and 302 ensures every request flows through your servers. Offer 301 as an opt-in for users who prioritize performance over analytics.
+          </div>
+
+          <h3>6c. Caching Strategy</h3>
+          <p>Redis is the caching layer between app servers and the database. It is critical for meeting the &lt;100ms p99 latency requirement.</p>
+          <ul>
+            <li><strong>Cache key:</strong> <code>short_key</code> &rarr; <code>long_url</code>. Simple string-to-string mapping.</li>
+            <li><strong>Cache TTL:</strong> 24 hours. Balances memory usage with hit rate. Hot URLs stay cached; cold URLs expire naturally.</li>
+            <li><strong>Cache size:</strong> If 20% of URLs account for 80% of traffic (Pareto principle), caching the top 20% of daily active URLs is sufficient. At ~2M active URLs/day &times; 500B = ~1GB — easily fits in a single Redis node.</li>
+            <li><strong>Eviction policy:</strong> LRU (Least Recently Used). Automatically evicts cold URLs when memory is full.</li>
+            <li><strong>Write-through on creation:</strong> When a new URL is created, write it to both DB and cache. This avoids a cache miss on the first redirect.</li>
+            <li><strong>Cache invalidation:</strong> On URL deletion or expiration, explicitly delete the cache entry to prevent stale redirects.</li>
+          </ul>
+
+          <h3>6d. Database Partitioning / Sharding</h3>
+          <p>At 182 billion records over 5 years, a single database instance is not viable. We need horizontal partitioning.</p>
+
+          <h4>Sharding Strategy: Hash-Based on <code>short_key</code></h4>
+          <ul>
+            <li>Compute <code>shard_id = hash(short_key) % N</code> where N = number of shards.</li>
+            <li>This distributes data uniformly because short keys are already pseudo-random (Base62-encoded counters).</li>
+            <li>Lookups are O(1) — hash the key, go directly to the correct shard.</li>
+            <li>No hot spots because the hash function distributes evenly.</li>
+          </ul>
+
+          <h4>Replication</h4>
+          <ul>
+            <li>Each shard has 3 replicas across different availability zones.</li>
+            <li>Writes go to the primary; reads can go to any replica (eventual consistency is acceptable for redirects — a few seconds of delay for a brand-new URL is fine).</li>
+          </ul>
+
+          <h4>Resharding</h4>
+          <ul>
+            <li>Use consistent hashing to minimize data movement when adding/removing shards.</li>
+            <li>With DynamoDB, this is handled automatically — partition splits are transparent.</li>
+          </ul>
+
+          <h3>6e. Rate Limiting</h3>
+          <p>Rate limiting protects the write path from abuse (spam URL creation, bot attacks).</p>
+          <ul>
+            <li><strong>Algorithm:</strong> Token bucket or sliding window counter, implemented in Redis.</li>
+            <li><strong>Limits:</strong>
+              <ul>
+                <li>Anonymous users: 10 URLs / hour per IP.</li>
+                <li>Authenticated users: 1,000 URLs / hour per API key.</li>
+                <li>Enterprise tier: 100,000 URLs / hour.</li>
+              </ul>
+            </li>
+            <li><strong>Implementation:</strong> Redis key = <code>rate:{user_id}:{window}</code>, value = counter. Use <code>INCR</code> + <code>EXPIRE</code> for sliding window.</li>
+            <li><strong>Read path:</strong> Generally not rate-limited (redirects should always work). Exception: DDoS protection at the load balancer level.</li>
+          </ul>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- TRADE-OFFS -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="tradeoffs"></span>
+        <section class="section">
+          <h2>7. Trade-offs</h2>
+
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Decision</th>
+                  <th>Option A</th>
+                  <th>Option B</th>
+                  <th>Recommendation</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>Hash vs Counter</strong></td>
+                  <td>Hash-based: no coordination, but collisions possible</td>
+                  <td>Counter-based: zero collisions, but needs range coordinator</td>
+                  <td>Counter-based. Collision-free generation is worth the operational cost of ZooKeeper.</td>
+                </tr>
+                <tr>
+                  <td><strong>SQL vs NoSQL</strong></td>
+                  <td>SQL: strong consistency, mature tooling, but manual sharding</td>
+                  <td>NoSQL: auto-scaling, key-value optimized, but eventual consistency</td>
+                  <td>NoSQL (DynamoDB). The access pattern is purely key-value, and auto-scaling is critical at 90TB+.</td>
+                </tr>
+                <tr>
+                  <td><strong>301 vs 302</strong></td>
+                  <td>301: lower server load, browser caches redirect</td>
+                  <td>302: every click tracked, higher server load</td>
+                  <td>302 by default. Analytics are a core feature. Offer 301 as opt-in.</td>
+                </tr>
+                <tr>
+                  <td><strong>Custom alias handling</strong></td>
+                  <td>Allow any string: flexible but risks offensive/reserved words</td>
+                  <td>Restrict to alphanumeric + hyphens with blocklist: safer but less flexible</td>
+                  <td>Restricted with blocklist. Maintain a deny-list of reserved words (api, admin, health, etc.) and offensive terms.</td>
+                </tr>
+                <tr>
+                  <td><strong>Consistency vs Availability</strong></td>
+                  <td>Strong consistency: no stale reads, but higher latency and lower availability during partitions</td>
+                  <td>Eventual consistency: faster reads, higher availability, but brief staleness window</td>
+                  <td>Eventual consistency for reads (redirects). Strong consistency only for custom alias uniqueness checks (conditional writes in DynamoDB).</td>
+                </tr>
+                <tr>
+                  <td><strong>Analytics: sync vs async</strong></td>
+                  <td>Synchronous: accurate counts but adds latency to redirect</td>
+                  <td>Asynchronous (Kafka + batch processing): no redirect latency impact, but counts are delayed</td>
+                  <td>Asynchronous. Never add latency to the redirect hot path. Use Kafka &rarr; Flink/Spark &rarr; analytics DB.</td>
+                </tr>
+                <tr>
+                  <td><strong>Expiration cleanup</strong></td>
+                  <td>Eager deletion: background job scans and deletes expired URLs</td>
+                  <td>Lazy deletion: check expiration on read, delete if expired</td>
+                  <td>Both. Lazy deletion on the read path (immediate user feedback) + periodic background cleanup job to reclaim storage.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- REVISION CHECKLIST -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="revision"></span>
+        <section class="section">
+          <h2>8. Revision Checklist</h2>
+          <p>Use this checklist to verify you can recall the key design decisions before your interview.</p>
+
+          <div class="checklist">
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>Write QPS is ~1,160/sec, read QPS is ~11,600/sec (10:1 ratio). Peak is 2x.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>7-character Base62 key gives 3.5 trillion unique combinations — sufficient for 182B records over 5 years.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>Counter-based ID generation (pre-allocated ranges via ZooKeeper) eliminates collisions entirely.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>Use 302 (not 301) by default to enable click analytics. 301 causes browsers to cache and bypass your server.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>Redis caches short_key &rarr; long_url mappings. ~90%+ cache hit rate. LRU eviction, 24h TTL.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>NoSQL (DynamoDB/Cassandra) is preferred over SQL: key-value access pattern, auto-sharding, 90TB+ storage.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>Database is sharded by hash(short_key). Consistent hashing minimizes data movement during resharding.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>Analytics are collected asynchronously via Kafka — never block the redirect hot path.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>Rate limiting on the write path: token bucket in Redis. Read path is generally unrestricted.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>Expired URLs: lazy deletion on read + background cleanup job for storage reclamation.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>Custom aliases require a uniqueness check (conditional write / strong consistent read) and a blocklist for reserved words.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>Total storage estimate: ~91 TB over 5 years at 500 bytes/record and 100M URLs/day.</span>
+            </label>
+          </div>
+        </section>
+
+        <!-- Bottom nav -->
+        <div class="problem-nav">
+          <a href="../index.html"><span class="nav-label">Previous</span><span class="nav-title">Home</span></a>
+          <a href="rate-limiter.html" class="next"><span class="nav-label">Next</span><span class="nav-title">Design Rate Limiter</span></a>
+        </div>
+      </div>
+    </div>
+  </main>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script src="../js/app.js"></script>
+</body>
+</html>

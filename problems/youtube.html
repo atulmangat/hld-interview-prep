@@ -1,0 +1,1207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Design YouTube — HLD Interview Prep</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+  <nav class="top-nav">
+    <div class="top-nav-inner">
+      <a href="../index.html" class="nav-logo">
+        <div class="nav-logo-icon">SD</div>
+        <span>HLD Interview Prep</span>
+      </a>
+      <div class="nav-actions">
+        <div class="nav-breadcrumb">
+          <a href="../index.html">Home</a>
+          <span class="separator">/</span>
+          <span class="current">YouTube</span>
+        </div>
+        <button class="theme-toggle" id="theme-toggle">&#x263E;</button>
+      </div>
+    </div>
+  </nav>
+  <div class="scroll-progress"></div>
+
+  <main class="main-content">
+    <div class="problem-page">
+      <!-- Sidebar TOC -->
+      <aside class="sidebar">
+        <div class="sidebar-title">On This Page</div>
+        <ul class="toc-list">
+          <li><a href="#requirements">Requirements</a></li>
+          <li><a href="#estimation">Capacity Estimation</a></li>
+          <li><a href="#api-design">API Design</a></li>
+          <li><a href="#data-model">Data Model</a></li>
+          <li><a href="#high-level-design">High-Level Design</a></li>
+          <li><a href="#deep-dive">Deep Dive</a></li>
+          <li><a href="#tradeoffs">Trade-offs</a></li>
+          <li><a href="#revision">Revision Checklist</a></li>
+        </ul>
+        <div class="progress-bar"><div class="progress-fill" style="width: 0%"></div></div>
+      </aside>
+
+      <div class="problem-content">
+        <!-- Header -->
+        <div class="problem-header">
+          <h1>Design YouTube</h1>
+          <p class="problem-subtitle">Design a scalable video sharing platform that supports video upload with multi-resolution transcoding, adaptive bitrate streaming to billions of users, search and discovery, engagement features (likes, comments, subscriptions), and a personalized recommendation engine &mdash; all with global low-latency delivery at the scale of 2 billion monthly active users and 1 billion video views per day.</p>
+          <div class="problem-meta-bar">
+            <span class="meta-badge difficulty-hard">Hard</span>
+            <span class="meta-badge">Media &amp; Content</span>
+            <span class="meta-badge">Asked at: Google, Netflix, Amazon</span>
+          </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- REQUIREMENTS -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="requirements"></span>
+        <section class="section">
+          <h2>1. Requirements</h2>
+
+          <h3>Functional Requirements</h3>
+          <ul class="content-list">
+            <li><strong>Upload video</strong> &mdash; Creators can upload videos of arbitrary length and size. The system accepts the raw video file, transcodes it into multiple resolutions and formats, generates thumbnails, and makes it available for streaming. Uploads should be resumable for large files.</li>
+            <li><strong>Stream video</strong> &mdash; Users can watch videos with adaptive bitrate streaming that automatically adjusts quality based on their network bandwidth. The player supports seeking, pausing, and resuming. Videos are served from edge locations closest to the user.</li>
+            <li><strong>Search videos</strong> &mdash; Users can search for videos by title, description, tags, and channel name. Results are ranked by relevance, view count, recency, and engagement metrics.</li>
+            <li><strong>Like and comment</strong> &mdash; Users can like/dislike videos and post comments. Like counts are displayed on the video page. Comments support threading (replies) and are paginated.</li>
+            <li><strong>Recommendations</strong> &mdash; The home page and &ldquo;Up Next&rdquo; sidebar display personalized video recommendations based on watch history, subscriptions, trending content, and collaborative filtering.</li>
+            <li><strong>Subscriptions</strong> &mdash; Users can subscribe to channels. New uploads from subscribed channels appear in the user&rsquo;s subscription feed. Subscribers receive notifications for new uploads.</li>
+          </ul>
+
+          <h3>Non-Functional Requirements</h3>
+          <ul class="content-list">
+            <li><strong>Massive scale:</strong> 2 billion monthly active users, 800 million daily active users. 1 billion video views per day. 500 hours of video uploaded every minute. The system must handle extreme read-heavy traffic (view-to-upload ratio &gt; 100,000:1).</li>
+            <li><strong>Multi-resolution support:</strong> Every uploaded video must be available in multiple resolutions (240p, 360p, 480p, 720p, 1080p, 4K) and codecs (H.264, VP9, AV1) to serve diverse devices and network conditions.</li>
+            <li><strong>Global low latency:</strong> Video playback must start within 2 seconds (time to first byte). Buffering should be minimal (&lt;1% rebuffer rate). Content must be served from CDN edge locations closest to the viewer.</li>
+            <li><strong>High availability:</strong> The streaming service must be available 99.99% of the time. Upload processing can tolerate slightly lower availability (99.9%) since it is asynchronous.</li>
+            <li><strong>Durability:</strong> Once a video is uploaded and confirmed, it must never be lost. Raw and transcoded files are stored with 99.999999999% (11 nines) durability using replicated object storage.</li>
+            <li><strong>Cost efficiency:</strong> Storage and CDN bandwidth are the dominant costs. The system must optimize for cost through intelligent transcoding policies, tiered storage, and CDN cache efficiency.</li>
+          </ul>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> Start by clarifying scope: &ldquo;Are we designing the full YouTube platform, or focusing on the video upload and streaming pipeline?&rdquo; In a 45-minute interview, focus on the two core flows &mdash; <strong>upload</strong> and <strong>streaming</strong> &mdash; and go deep on the transcoding pipeline and CDN architecture. Also ask: &ldquo;Should we support live streaming, or only video-on-demand (VOD)?&rdquo; Live streaming is a fundamentally different architecture (RTMP ingest, real-time transcoding, ultra-low latency). For this design, focus on VOD. Finally, clarify scale: &ldquo;Are we designing for YouTube-scale (2B users) or a smaller video platform?&rdquo; Scale determines whether you need a global CDN and sophisticated transcoding pipeline.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- ESTIMATION -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="estimation"></span>
+        <section class="section">
+          <h2>2. Capacity Estimation</h2>
+
+          <h3>Assumptions</h3>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Parameter</th>
+                  <th>Value</th>
+                  <th>Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Monthly Active Users (MAU)</td>
+                  <td>2 billion</td>
+                  <td>YouTube-scale</td>
+                </tr>
+                <tr>
+                  <td>Daily Active Users (DAU)</td>
+                  <td>800 million</td>
+                  <td>~40% of MAU</td>
+                </tr>
+                <tr>
+                  <td>Video views per day</td>
+                  <td>1 billion</td>
+                  <td>~1.25 views per DAU per day (many users watch multiple)</td>
+                </tr>
+                <tr>
+                  <td>Video uploads per minute</td>
+                  <td>500 hours</td>
+                  <td>~720,000 videos/day (avg video ~1 min)</td>
+                </tr>
+                <tr>
+                  <td>Average original video size</td>
+                  <td>300 MB</td>
+                  <td>Mix of short (30s) and long (1hr+) videos</td>
+                </tr>
+                <tr>
+                  <td>Average video duration</td>
+                  <td>7 minutes</td>
+                  <td>Weighted average across all content types</td>
+                </tr>
+                <tr>
+                  <td>Transcoded resolutions</td>
+                  <td>5 (240p to 4K)</td>
+                  <td>Each resolution &times; multiple codecs</td>
+                </tr>
+                <tr>
+                  <td>Average streaming bitrate</td>
+                  <td>5 Mbps</td>
+                  <td>Weighted average across all resolutions</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>Upload &amp; Storage Calculation</h3>
+<pre><code>Upload throughput:
+  Videos uploaded/day    = 500 hours/min &times; 60 min/hr &times; 24 hr = 720,000 hours/day
+  At avg ~1 min/video    &asymp; 720,000 videos/day
+  Upload rate            = 720,000 / 86,400 &asymp; 8.3 uploads/sec
+
+Raw storage per day:
+  720,000 videos &times; 300 MB avg = 216 TB/day (raw originals)
+
+Transcoded storage per day:
+  Each video transcoded to 5 resolutions:
+    240p:  ~15 MB    (5% of original)
+    360p:  ~30 MB    (10%)
+    480p:  ~60 MB    (20%)
+    720p:  ~120 MB   (40%)
+    1080p: ~200 MB   (67%)
+    4K:    ~600 MB   (200% — higher bitrate than typical upload)
+  Total per video &asymp; 1,025 MB &asymp; 1 GB (all resolutions combined)
+  Daily transcoded storage = 720,000 &times; 1 GB &asymp; 720 TB/day
+
+  With multiple codecs (H.264 + VP9):
+  Total daily storage &asymp; 720 TB &times; 1.5 &asymp; 1.08 PB/day
+
+  Yearly storage &asymp; 1 PB/day &times; 365 &asymp; 365 PB/year</code></pre>
+
+          <h3>Streaming Throughput Calculation</h3>
+<pre><code>Streaming QPS:
+  Views/day              = 1 billion
+  Views/sec              = 1B / 86,400 &asymp; 11,574 streams/sec
+  Peak (3x)              &asymp; 34,700 concurrent streams
+
+CDN bandwidth:
+  Average bitrate        = 5 Mbps per stream
+  Concurrent streams     = 11,574 (avg) to 34,700 (peak)
+  Avg bandwidth          = 5 Mbps &times; 11,574 = ~57.9 Gbps
+  Peak bandwidth         = 5 Mbps &times; 34,700 = ~173.5 Gbps
+
+  This is served from CDN edge nodes distributed globally.
+  A single CDN PoP handles ~1-10 Gbps, so we need 20-200 PoPs.
+
+Daily egress:
+  1B views &times; 7 min avg &times; 5 Mbps = 1B &times; 420s &times; 5 Mbps
+  = 1B &times; 2,100 Mb = 1B &times; 262.5 MB = ~262 PB/day egress</code></pre>
+
+          <div class="info-box note">
+            <strong>Key Insight:</strong> The numbers reveal that YouTube is a <strong>storage and bandwidth problem</strong>, not a compute problem. At ~1 PB/day of new storage and ~262 PB/day of egress bandwidth, the dominant costs are object storage (S3/GCS) and CDN bandwidth. The upload rate (8.3 videos/sec) is trivial from a compute perspective, but the transcoding pipeline must process 720,000 videos/day, each requiring CPU-intensive encoding to multiple resolutions and codecs. The architecture must optimize for: (1) CDN cache hit ratio (serve &gt;80% of traffic from edge), (2) intelligent transcoding (don&rsquo;t transcode unpopular videos to all resolutions), and (3) tiered storage (move cold videos to cheaper storage classes).
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- API DESIGN -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="api-design"></span>
+        <section class="section">
+          <h2>3. API Design</h2>
+
+          <p>The YouTube API has two distinct patterns: <strong>upload APIs</strong> (write path, multipart/chunked) and <strong>streaming/read APIs</strong> (read path, high throughput). Upload uses presigned URLs for direct-to-storage uploads. Streaming is handled entirely by the CDN.</p>
+
+          <div class="api-endpoint">
+            <div class="api-endpoint-header">
+              <span class="api-method post">POST</span>
+              <span class="api-path">/api/v1/videos/upload/initiate</span>
+            </div>
+            <div class="api-endpoint-body">
+              <p>Initiate a video upload. Returns a presigned URL for the client to upload the raw video file directly to object storage (S3/GCS), bypassing the application server. This avoids routing large video files through the API layer.</p>
+<pre><code>Request:
+  POST /api/v1/videos/upload/initiate
+  Headers:
+    Content-Type: application/json
+    Authorization: Bearer &lt;creator-token&gt;
+  Body:
+  {
+    "title": "How to Build a Distributed System",
+    "description": "A deep dive into distributed systems design...",
+    "tags": ["system design", "engineering", "tutorial"],
+    "category": "Education",
+    "visibility": "public",
+    "file_name": "distributed-systems-tutorial.mp4",
+    "file_size": 524288000,          // 500 MB in bytes
+    "content_type": "video/mp4"
+  }
+
+Response (200 OK):
+{
+  "video_id": "vid_a1b2c3d4e5",
+  "upload_url": "https://storage.googleapis.com/yt-raw/vid_a1b2c3d4e5?X-Goog-Signature=...",
+  "upload_token": "tok_xyz789",
+  "expires_at": "2026-04-14T12:00:00Z",
+  "chunk_size": 10485760,            // 10 MB recommended chunk size
+  "max_file_size": 137438953472      // 128 GB max
+}</code></pre>
+            </div>
+          </div>
+
+          <div class="api-endpoint">
+            <div class="api-endpoint-header">
+              <span class="api-method post">POST</span>
+              <span class="api-path">/api/v1/videos/upload/complete</span>
+            </div>
+            <div class="api-endpoint-body">
+              <p>Called after the client finishes uploading all chunks to object storage. Triggers the transcoding pipeline. The video status transitions from &ldquo;uploading&rdquo; to &ldquo;processing.&rdquo;</p>
+<pre><code>Request:
+  POST /api/v1/videos/upload/complete
+  Headers:
+    Authorization: Bearer &lt;creator-token&gt;
+  Body:
+  {
+    "video_id": "vid_a1b2c3d4e5",
+    "upload_token": "tok_xyz789"
+  }
+
+Response (202 Accepted):
+{
+  "video_id": "vid_a1b2c3d4e5",
+  "status": "processing",
+  "estimated_time": 1800,            // ~30 min for a 500 MB video
+  "webhook_url": "/api/v1/videos/vid_a1b2c3d4e5/status"
+}</code></pre>
+            </div>
+          </div>
+
+          <div class="api-endpoint">
+            <div class="api-endpoint-header">
+              <span class="api-method get">GET</span>
+              <span class="api-path">/api/v1/videos/{video_id}/stream</span>
+            </div>
+            <div class="api-endpoint-body">
+              <p>Get the streaming manifest for a video. Returns an HLS/DASH manifest file that lists all available quality levels and their segment URLs. The video player uses this manifest to implement adaptive bitrate streaming.</p>
+<pre><code>Request:
+  GET /api/v1/videos/vid_a1b2c3d4e5/stream
+  Headers:
+    Authorization: Bearer &lt;user-token&gt;   // Optional for public videos
+
+Response (200 OK):
+{
+  "video_id": "vid_a1b2c3d4e5",
+  "title": "How to Build a Distributed System",
+  "manifest_url": "https://cdn.youtube.example.com/vid_a1b2c3d4e5/master.m3u8",
+  "thumbnail_url": "https://cdn.youtube.example.com/vid_a1b2c3d4e5/thumb.jpg",
+  "duration": 1847,                   // seconds
+  "available_qualities": [
+    {"resolution": "240p",  "bitrate": 400,  "codec": "h264"},
+    {"resolution": "360p",  "bitrate": 800,  "codec": "h264"},
+    {"resolution": "480p",  "bitrate": 1500, "codec": "h264"},
+    {"resolution": "720p",  "bitrate": 3000, "codec": "vp9"},
+    {"resolution": "1080p", "bitrate": 5000, "codec": "vp9"},
+    {"resolution": "4K",    "bitrate": 15000,"codec": "av1"}
+  ],
+  "captions": [
+    {"language": "en", "url": "https://cdn.youtube.example.com/vid_a1b2c3d4e5/captions/en.vtt"}
+  ]
+}</code></pre>
+            </div>
+          </div>
+
+          <div class="api-endpoint">
+            <div class="api-endpoint-header">
+              <span class="api-method get">GET</span>
+              <span class="api-path">/api/v1/videos/search?q={query}&amp;page={page}&amp;limit={limit}</span>
+            </div>
+            <div class="api-endpoint-body">
+              <p>Search for videos by keyword. Returns paginated results ranked by relevance, view count, and recency.</p>
+<pre><code>Request:
+  GET /api/v1/videos/search?q=distributed+systems&amp;page=1&amp;limit=20
+
+Response (200 OK):
+{
+  "query": "distributed systems",
+  "results": [
+    {
+      "video_id": "vid_a1b2c3d4e5",
+      "title": "How to Build a Distributed System",
+      "channel": "Tech Academy",
+      "thumbnail_url": "https://cdn.youtube.example.com/.../thumb.jpg",
+      "duration": 1847,
+      "view_count": 2450000,
+      "published_at": "2026-04-10T08:00:00Z"
+    }
+  ],
+  "total_results": 15420,
+  "page": 1,
+  "has_more": true
+}</code></pre>
+            </div>
+          </div>
+
+          <div class="api-endpoint">
+            <div class="api-endpoint-header">
+              <span class="api-method post">POST</span>
+              <span class="api-path">/api/v1/videos/{video_id}/like</span>
+            </div>
+            <div class="api-endpoint-body">
+              <p>Like or dislike a video. Idempotent &mdash; calling again with the same type is a no-op. Calling with a different type changes the reaction.</p>
+<pre><code>Request:
+  POST /api/v1/videos/vid_a1b2c3d4e5/like
+  Headers:
+    Authorization: Bearer &lt;user-token&gt;
+  Body:
+  {
+    "type": "like"                    // "like" or "dislike"
+  }
+
+Response (200 OK):
+{
+  "video_id": "vid_a1b2c3d4e5",
+  "user_reaction": "like",
+  "like_count": 2450001,
+  "dislike_count": 12300
+}</code></pre>
+            </div>
+          </div>
+
+          <div class="info-box warning">
+            <strong>Why Presigned URLs for Upload?</strong> Video files are large (100 MB &ndash; 128 GB). Routing them through the API server would: (1) consume massive bandwidth on the API layer, (2) require the API server to hold the entire file in memory or stream it, (3) create a single point of failure for uploads. With presigned URLs, the client uploads directly to object storage (S3/GCS), which is designed for high-throughput, large-file uploads with built-in chunking, resumability, and multipart support. The API server only handles the lightweight metadata (title, description, tags) and issues the presigned URL. This is the standard pattern used by YouTube, Vimeo, and all major video platforms.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- DATA MODEL -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="data-model"></span>
+        <section class="section">
+          <h2>4. Data Model</h2>
+
+          <h3>videos</h3>
+          <p>Core video metadata table. Stored in a relational database (PostgreSQL) with read replicas for high read throughput.</p>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Column</th>
+                  <th>Type</th>
+                  <th>Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>video_id</code></td>
+                  <td>VARCHAR (PK)</td>
+                  <td>Unique video identifier (e.g., &ldquo;vid_a1b2c3d4e5&rdquo;)</td>
+                </tr>
+                <tr>
+                  <td><code>title</code></td>
+                  <td>VARCHAR(500)</td>
+                  <td>Video title</td>
+                </tr>
+                <tr>
+                  <td><code>description</code></td>
+                  <td>TEXT</td>
+                  <td>Video description (supports markdown/links)</td>
+                </tr>
+                <tr>
+                  <td><code>uploader_id</code></td>
+                  <td>UUID (FK)</td>
+                  <td>Creator who uploaded the video</td>
+                </tr>
+                <tr>
+                  <td><code>status</code></td>
+                  <td>ENUM</td>
+                  <td><code>uploading</code>, <code>processing</code>, <code>ready</code>, <code>failed</code>, <code>removed</code></td>
+                </tr>
+                <tr>
+                  <td><code>visibility</code></td>
+                  <td>ENUM</td>
+                  <td><code>public</code>, <code>unlisted</code>, <code>private</code></td>
+                </tr>
+                <tr>
+                  <td><code>original_url</code></td>
+                  <td>VARCHAR</td>
+                  <td>Object storage URL for the raw uploaded file</td>
+                </tr>
+                <tr>
+                  <td><code>manifest_url</code></td>
+                  <td>VARCHAR</td>
+                  <td>CDN URL for the HLS/DASH manifest (.m3u8)</td>
+                </tr>
+                <tr>
+                  <td><code>thumbnail_url</code></td>
+                  <td>VARCHAR</td>
+                  <td>CDN URL for the video thumbnail</td>
+                </tr>
+                <tr>
+                  <td><code>duration</code></td>
+                  <td>INT</td>
+                  <td>Video duration in seconds</td>
+                </tr>
+                <tr>
+                  <td><code>resolution_list</code></td>
+                  <td>JSONB</td>
+                  <td>Array of available resolutions and codecs</td>
+                </tr>
+                <tr>
+                  <td><code>file_size</code></td>
+                  <td>BIGINT</td>
+                  <td>Original file size in bytes</td>
+                </tr>
+                <tr>
+                  <td><code>category</code></td>
+                  <td>VARCHAR</td>
+                  <td>Content category (Education, Music, Gaming, etc.)</td>
+                </tr>
+                <tr>
+                  <td><code>tags</code></td>
+                  <td>TEXT[]</td>
+                  <td>Array of tags for search and discovery</td>
+                </tr>
+                <tr>
+                  <td><code>created_at</code></td>
+                  <td>TIMESTAMP</td>
+                  <td>Upload initiation time</td>
+                </tr>
+                <tr>
+                  <td><code>published_at</code></td>
+                  <td>TIMESTAMP</td>
+                  <td>When the video became publicly available</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>video_stats</h3>
+          <p>Denormalized counters for video engagement metrics. Separated from the videos table to avoid write contention on hot rows (popular videos get millions of views/likes per day).</p>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Column</th>
+                  <th>Type</th>
+                  <th>Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>video_id</code></td>
+                  <td>VARCHAR (PK, FK)</td>
+                  <td>References videos table</td>
+                </tr>
+                <tr>
+                  <td><code>view_count</code></td>
+                  <td>BIGINT</td>
+                  <td>Total view count (updated asynchronously via counter service)</td>
+                </tr>
+                <tr>
+                  <td><code>like_count</code></td>
+                  <td>BIGINT</td>
+                  <td>Total likes</td>
+                </tr>
+                <tr>
+                  <td><code>dislike_count</code></td>
+                  <td>BIGINT</td>
+                  <td>Total dislikes</td>
+                </tr>
+                <tr>
+                  <td><code>comment_count</code></td>
+                  <td>BIGINT</td>
+                  <td>Total comments</td>
+                </tr>
+                <tr>
+                  <td><code>updated_at</code></td>
+                  <td>TIMESTAMP</td>
+                  <td>Last counter update time</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>comments</h3>
+          <p>Threaded comments on videos. Supports top-level comments and replies.</p>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Column</th>
+                  <th>Type</th>
+                  <th>Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>comment_id</code></td>
+                  <td>UUID (PK)</td>
+                  <td>Unique comment identifier</td>
+                </tr>
+                <tr>
+                  <td><code>video_id</code></td>
+                  <td>VARCHAR (FK, indexed)</td>
+                  <td>The video this comment belongs to</td>
+                </tr>
+                <tr>
+                  <td><code>user_id</code></td>
+                  <td>UUID (FK)</td>
+                  <td>Author of the comment</td>
+                </tr>
+                <tr>
+                  <td><code>parent_id</code></td>
+                  <td>UUID (FK, nullable)</td>
+                  <td>Parent comment ID for replies (null for top-level)</td>
+                </tr>
+                <tr>
+                  <td><code>content</code></td>
+                  <td>TEXT</td>
+                  <td>Comment text</td>
+                </tr>
+                <tr>
+                  <td><code>like_count</code></td>
+                  <td>INT</td>
+                  <td>Number of likes on this comment</td>
+                </tr>
+                <tr>
+                  <td><code>created_at</code></td>
+                  <td>TIMESTAMP</td>
+                  <td>Comment creation time</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>likes</h3>
+          <p>Records individual user reactions (like/dislike) on videos. Used for deduplication and to show the user their own reaction state.</p>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Column</th>
+                  <th>Type</th>
+                  <th>Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>user_id</code></td>
+                  <td>UUID (PK, part 1)</td>
+                  <td>The user who reacted</td>
+                </tr>
+                <tr>
+                  <td><code>video_id</code></td>
+                  <td>VARCHAR (PK, part 2)</td>
+                  <td>The video reacted to</td>
+                </tr>
+                <tr>
+                  <td><code>type</code></td>
+                  <td>ENUM</td>
+                  <td><code>like</code> or <code>dislike</code></td>
+                </tr>
+                <tr>
+                  <td><code>created_at</code></td>
+                  <td>TIMESTAMP</td>
+                  <td>When the reaction was created</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="info-box note">
+            <strong>Why Separate video_stats from videos?</strong> A viral video can receive millions of views, likes, and comments per hour. If view_count were a column in the videos table, every view would trigger a write to the same row, causing extreme write contention and lock conflicts. By separating counters into video_stats, we can: (1) use a dedicated counter service (Redis + async flush to DB) to batch-increment counts, (2) cache video metadata independently of volatile counters, and (3) use different consistency models &mdash; video metadata is strongly consistent, but view counts can be eventually consistent (it&rsquo;s fine if the count is a few seconds stale).
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- HIGH-LEVEL DESIGN -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="high-level-design"></span>
+        <section class="section">
+          <h2>5. High-Level Design</h2>
+
+          <p>The system is split into two independent flows: the <strong>Upload Flow</strong> (write path &mdash; ingest, transcode, and store videos) and the <strong>Streaming Flow</strong> (read path &mdash; serve videos to viewers via CDN). These two flows operate at vastly different scales and have different optimization priorities.</p>
+
+          <h3>System Architecture</h3>
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    subgraph Upload["UPLOAD FLOW (Write Path)"]
+        Creator["Creator Client"] --> APIGw["API Gateway\n- Auth\n- Rate limit\n- Route"]
+        APIGw --> UploadSvc["Upload Service\n- Generate video_id\n- Create DB record\n- Return presigned URL"]
+        Creator -->|"Direct upload\n(presigned URL)"| ObjStore["Object Storage\n(S3 / GCS)\n/raw/vid_a1b2c3/original.mp4"]
+        ObjStore -->|"S3 Event\n(object created)"| MQ["Message Queue\n(SQS / Kafka)"]
+        MQ --> Pipeline["Transcoding Pipeline (DAG)"]
+        Inspect["Video Inspect\n(probe codec, res, fps)"]
+        Parallel["Parallel Tasks:\nEncode 240p | 360p | 480p\n720p | 1080p | 4K\nExtract Audio | Thumbnail\nWatermark"]
+        Manifest["Generate HLS/DASH\nManifest (.m3u8 / .mpd)"]
+        TranscodedStore["Object Storage\n(Transcoded)\n/transcoded/vid_a1b2c3/\n240p/ 360p/ 720p/\n1080p/ master.m3u8"]
+        Finalize["Update DB: status=ready\nPush to CDN\nNotify creator"]
+        Pipeline --> Inspect --> Parallel --> Manifest --> TranscodedStore --> Finalize
+    end
+
+    subgraph Stream["STREAMING FLOW (Read Path)"]
+        Viewer["Viewer Client"] -->|"1. Fetch manifest\n2. Fetch segments\n3. ABR quality switch"| CDN["CDN Edge Node\n(Closest PoP)\n~80-95% served from cache"]
+        CDN -->|"Cache MISS\n~5-20%"| Origin["Origin Server\n(Object Storage / S3)"]
+    end
+</div></div>
+
+          <h3>Upload Flow Summary</h3>
+          <div class="flow-container">
+            <div class="flow-box">Creator uploads via presigned URL</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Raw file lands in Object Storage</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">S3 event triggers Transcoding Pipeline</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">DAG: encode, thumbnail, manifest</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">Transcoded files stored &amp; pushed to CDN</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Video status = &ldquo;ready&rdquo;</div>
+          </div>
+
+          <h3>Streaming Flow Summary</h3>
+          <div class="flow-container">
+            <div class="flow-box">Viewer requests video</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">API returns manifest URL</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">Player fetches .m3u8 manifest</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Player requests .ts segments from CDN</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">CDN serves from edge cache (or pulls from origin)</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">ABR adjusts quality in real time</div>
+          </div>
+
+          <h3>Key Components</h3>
+          <ul class="content-list">
+            <li><strong>Upload Service:</strong> Lightweight API that handles video metadata, generates presigned URLs for direct-to-storage uploads, and creates the initial database record with status &ldquo;uploading.&rdquo; Does not handle the actual video bytes.</li>
+            <li><strong>Object Storage (S3/GCS):</strong> Stores both raw uploaded files and transcoded output. Provides 11-nines durability, automatic replication, and lifecycle policies for tiered storage (hot &rarr; warm &rarr; cold).</li>
+            <li><strong>Transcoding Pipeline:</strong> A DAG (directed acyclic graph) of tasks that processes each uploaded video: inspect, split, encode to multiple resolutions/codecs, extract audio, generate thumbnails, apply watermarks, and create the streaming manifest. Runs on a fleet of GPU/CPU workers.</li>
+            <li><strong>CDN (Content Delivery Network):</strong> Global network of edge servers that cache and serve video segments close to viewers. Handles 80-95% of streaming traffic without hitting the origin. Critical for low-latency playback and reducing origin bandwidth costs.</li>
+            <li><strong>Video Metadata Service:</strong> Manages video metadata (title, description, tags, status) in PostgreSQL. Serves video detail pages and search results. Uses read replicas for high read throughput.</li>
+            <li><strong>Counter Service:</strong> Tracks view counts, likes, and other engagement metrics using Redis for real-time counting with periodic flush to the database. Handles the extreme write volume on popular videos.</li>
+          </ul>
+
+          <div class="info-box important">
+            <strong>Why Two Separate Flows?</strong> The upload flow and streaming flow have fundamentally different characteristics. Upload is <strong>write-heavy, CPU-intensive</strong> (transcoding), tolerates higher latency (async processing), and handles ~8 uploads/sec. Streaming is <strong>read-heavy, bandwidth-intensive</strong>, requires ultra-low latency (&lt;2s startup), and handles ~11,500 concurrent streams. Coupling them would mean a spike in uploads (e.g., a viral event causing mass uploads) could degrade streaming performance. By separating them, each flow can scale independently: add more transcoding workers for upload spikes, add more CDN capacity for viewing spikes.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- DEEP DIVE -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="deep-dive"></span>
+        <section class="section">
+          <h2>6. Deep Dive</h2>
+
+          <!-- 6a. Video Upload Flow -->
+          <h3>6a. Video Upload Flow &mdash; Presigned URLs and Resumable Uploads</h3>
+          <p>Uploading large video files (100 MB &ndash; 128 GB) over unreliable networks requires a robust upload mechanism. The system uses <strong>presigned URLs</strong> for direct-to-storage uploads and <strong>chunked/resumable uploads</strong> to handle network interruptions.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+sequenceDiagram
+    participant C as Creator Client
+    participant A as API Server
+    participant S3 as Object Storage (S3)
+
+    rect rgb(240, 248, 255)
+    Note over C,S3: Presigned URL Upload Flow
+    C->>A: POST /upload/initiate {title, file_size: 500MB}
+    A->>S3: Generate presigned URL (PUT, expires 1hr)
+    A-->>C: {upload_url, video_id}
+    C->>S3: PUT Chunk 1 (bytes 0-10MB)
+    C->>S3: PUT Chunk 2 (bytes 10-20MB)
+    Note over C,S3: ... chunks 3-49 ...
+    C->>S3: PUT Chunk 50 (bytes 490-500MB)
+    S3-->>C: 200 OK (upload complete)
+    C->>A: POST /upload/complete {video_id, upload_token}
+    A->>S3: Trigger transcoding (S3 event / SQS)
+    A-->>C: 202 Accepted {status: processing}
+    end
+
+    rect rgb(255, 248, 240)
+    Note over C,S3: Resumable Upload (network failure recovery)
+    C->>S3: Chunk 1 (0-10MB) ✓
+    C->>S3: Chunk 2 (10-20MB) ✓
+    C->>S3: Chunk 3 (20-30MB) ✓
+    C-xS3: Chunk 4 (30-40MB) ✗ NETWORK FAILURE
+    Note over C,S3: ... user reconnects ...
+    C->>S3: GET upload status
+    S3-->>C: {bytes_received: 30MB}
+    C->>S3: Chunk 4 retry (30-40MB) ✓
+    C->>S3: Chunk 5 (40-50MB) ✓
+    Note over C,S3: ... continue to Chunk 50 ...
+    C->>S3: Chunk 50 (490-500MB) ✓
+    S3-->>C: 200 OK (upload complete)
+    end
+</div></div>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> Mention the three key benefits of presigned URLs: &ldquo;First, the API server never touches the video bytes &mdash; it stays lightweight and can be scaled independently. Second, S3/GCS provides built-in multipart upload with automatic retry and resumability &mdash; we get this for free. Third, the presigned URL is time-limited and scoped to a specific object key, so even if it leaks, the damage is bounded. The trade-off is that the client needs to implement the chunked upload protocol, but all major cloud SDKs provide this out of the box.&rdquo;
+          </div>
+
+          <!-- 6b. Video Transcoding Pipeline -->
+          <h3>6b. Video Transcoding Pipeline &mdash; DAG Architecture</h3>
+          <p>Transcoding is the most compute-intensive part of the system. Each uploaded video must be encoded into multiple resolutions and codecs, with audio extraction, thumbnail generation, and manifest creation. This is modeled as a <strong>DAG (Directed Acyclic Graph)</strong> of tasks with dependencies.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    Inspect["VIDEO INSPECT\n(ffprobe)\nProbe codec, resolution,\nframe rate, duration"]
+    Split["VIDEO SPLIT\nSplit into segments\n(4-second GOPs)"]
+    Enc240["240p H.264 encode"]
+    Enc360["360p H.264 encode"]
+    Enc480["480p H.264 encode"]
+    Enc720["720p VP9 encode"]
+    Enc1080["1080p VP9 encode"]
+    Enc4K["4K AV1 encode"]
+    Audio["Audio Extract\n(AAC/Opus)"]
+    Thumb["Generate Thumbnail\n(multiple frames)"]
+    Watermark["Apply Watermark"]
+    Moderation["Content Moderation\n(ML scan for violations)"]
+    Manifest["GENERATE MANIFEST\nCreate .m3u8 (HLS) and\n.mpd (DASH) listing\nall qualities & segments"]
+    UploadCDN["UPLOAD TO CDN\nStore transcoded segments\nPre-warm cache for\npopular creators"]
+
+    Inspect --> Split
+    Split --> Enc240
+    Split --> Enc360
+    Split --> Enc480
+    Split --> Enc720
+    Split --> Enc1080
+    Split --> Enc4K
+    Split --> Audio
+    Enc240 --> Thumb
+    Enc360 --> Thumb
+    Enc480 --> Thumb
+    Enc720 --> Thumb
+    Enc1080 --> Thumb
+    Enc4K --> Thumb
+    Audio --> Thumb
+    Thumb --> Watermark
+    Thumb --> Moderation
+    Watermark --> Manifest
+    Moderation --> Manifest
+    Manifest --> UploadCDN
+</div></div>
+
+          <h4>Video Codec Comparison</h4>
+          <p>Choosing the right codec for each resolution is a trade-off between compression efficiency, encoding cost, and device compatibility.</p>
+
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Codec</th>
+                  <th>Compression</th>
+                  <th>Encoding Speed</th>
+                  <th>Device Support</th>
+                  <th>Best For</th>
+                  <th>Licensing</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>H.264 (AVC)</strong></td>
+                  <td>Baseline (1x)</td>
+                  <td>Fast</td>
+                  <td>Universal (99%+ devices)</td>
+                  <td>Low resolutions (240p-480p), legacy devices</td>
+                  <td>Licensed (MPEG-LA)</td>
+                </tr>
+                <tr>
+                  <td><strong>H.265 (HEVC)</strong></td>
+                  <td>~40% better than H.264</td>
+                  <td>2-3x slower</td>
+                  <td>Good (90%+ modern devices)</td>
+                  <td>4K content, Apple ecosystem</td>
+                  <td>Licensed (complex, expensive)</td>
+                </tr>
+                <tr>
+                  <td><strong>VP9</strong></td>
+                  <td>~30-40% better than H.264</td>
+                  <td>2-3x slower</td>
+                  <td>Good (Chrome, Android, smart TVs)</td>
+                  <td>720p-1080p, YouTube&rsquo;s primary codec</td>
+                  <td>Royalty-free (Google)</td>
+                </tr>
+                <tr>
+                  <td><strong>AV1</strong></td>
+                  <td>~50% better than H.264</td>
+                  <td>5-10x slower</td>
+                  <td>Growing (modern browsers, new devices)</td>
+                  <td>4K/HDR, bandwidth-constrained regions</td>
+                  <td>Royalty-free (AOM alliance)</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="comparison-grid">
+            <div class="comparison-card">
+              <h4>YouTube&rsquo;s Codec Strategy</h4>
+<pre><code>Resolution → Codec mapping:
+  240p, 360p, 480p → H.264
+    (universal compatibility, fast encode)
+
+  720p, 1080p → VP9
+    (30-40% smaller files, royalty-free,
+     supported by Chrome + Android)
+
+  4K, HDR → AV1
+    (50% smaller than H.264, critical
+     for 4K where bandwidth matters most)
+
+Each video is encoded in multiple codecs.
+The player selects the best codec the
+device supports.</code></pre>
+            </div>
+            <div class="comparison-card">
+              <h4>Encoding Cost Trade-off</h4>
+<pre><code>Encoding a 1-hour video:
+
+  H.264 (1080p): ~10 min on 1 CPU core
+  VP9   (1080p): ~30 min on 1 CPU core
+  AV1   (1080p): ~90 min on 1 CPU core
+
+AV1 is 9x more expensive to encode,
+but saves ~50% bandwidth on every view.
+
+Break-even: If a video gets >100 views,
+the bandwidth savings from AV1 exceed
+the extra encoding cost.
+
+For popular videos (millions of views),
+AV1 encoding pays for itself 10,000x.</code></pre>
+            </div>
+          </div>
+
+          <div class="info-box note">
+            <strong>Key Insight:</strong> Transcoding is a classic <strong>space-time trade-off</strong>. We spend CPU time once (during encoding) to save bandwidth on every subsequent view. Since the view-to-upload ratio is &gt;100,000:1, even expensive encoding (AV1) is massively cost-effective for popular videos. The transcoding pipeline should use a task queue (SQS, Celery) with auto-scaling workers, and can leverage spot/preemptible instances for 60-80% cost savings since transcoding is fault-tolerant (failed tasks are simply retried).
+          </div>
+
+          <!-- 6c. Adaptive Bitrate Streaming -->
+          <h3>6c. Adaptive Bitrate Streaming &mdash; HLS and DASH</h3>
+          <p>Adaptive bitrate streaming (ABR) is the technique that allows the video player to dynamically switch between quality levels based on the viewer&rsquo;s current network bandwidth. This is how YouTube seamlessly transitions from 1080p to 480p when your WiFi degrades, and back to 1080p when it recovers.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    Original["Original Video\n(30 min, 1.2 GB at 1080p)"]
+    Split["Split into 4-sec segments\n450 segments x 4s = 30 min"]
+    Qualities["Each segment at every quality:\n240p seg0.ts → 50 KB\n360p seg0.ts → 100 KB\n480p seg0.ts → 187 KB\n720p seg0.ts → 375 KB\n1080p seg0.ts → 625 KB\n4K seg0.ts → 1.87 MB"]
+    Master["Master manifest (.m3u8)\nLists all quality levels\nwith bandwidth & resolution"]
+    Playlist["Quality-level playlist\nLists all .ts segment URLs\nfor that quality"]
+    Player["Player dynamically switches quality\nTime: 0s → 4s → 8s → 12s → 16s → 20s → 24s\nQuality: 1080p → 1080p → 720p → 480p → 480p → 720p → 1080p\nBW: 25Mbps → 25Mbps → 4Mbps → 2Mbps → 2Mbps → 8Mbps → 20Mbps"]
+
+    Original --> Split --> Qualities --> Master --> Playlist --> Player
+</div></div>
+
+          <div class="comparison-grid">
+            <div class="comparison-card">
+              <h4>HLS (HTTP Live Streaming)</h4>
+              <ul class="content-list">
+                <li>Developed by Apple (2009)</li>
+                <li>Uses .m3u8 manifests and .ts segments</li>
+                <li>Native support on iOS, Safari, most smart TVs</li>
+                <li>Segment duration: 2-10 seconds (typically 4-6s)</li>
+                <li>Dominant protocol for VOD streaming</li>
+                <li>Used by: YouTube, Netflix, Twitch, Disney+</li>
+              </ul>
+            </div>
+            <div class="comparison-card">
+              <h4>DASH (Dynamic Adaptive Streaming over HTTP)</h4>
+              <ul class="content-list">
+                <li>Open standard (ISO/IEC 23009-1)</li>
+                <li>Uses .mpd manifests and .m4s segments</li>
+                <li>Native support on Android, Chrome, most browsers</li>
+                <li>More flexible: supports DRM, multi-period, ads</li>
+                <li>Codec-agnostic (works with any codec)</li>
+                <li>Used by: YouTube (alongside HLS), Netflix</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> Mention that YouTube uses <strong>both HLS and DASH</strong>. &ldquo;We generate both .m3u8 (HLS) and .mpd (DASH) manifests during transcoding. The player selects the appropriate protocol based on the device: HLS for iOS/Safari, DASH for Android/Chrome. Both protocols work over standard HTTP, which means all existing CDN infrastructure, caches, and proxies work without modification. This is a key advantage over older streaming protocols like RTMP, which required specialized servers.&rdquo;
+          </div>
+
+          <!-- 6d. CDN Architecture -->
+          <h3>6d. CDN Architecture &mdash; Why CDN Is Critical</h3>
+          <p>The CDN is the most important component in the streaming flow. At YouTube&rsquo;s scale, 80-95% of all video traffic is served directly from CDN edge nodes, never reaching the origin servers. Without a CDN, the origin would need to handle ~262 PB/day of egress &mdash; an impossible amount of bandwidth from a single data center.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    Origin["ORIGIN\n(S3 / GCS)\nUS-East"]
+    MidUS["MID-TIER CACHE\nUS-West"]
+    MidEU["MID-TIER CACHE\nEU-Central"]
+    MidAsia["MID-TIER CACHE\nAsia-East"]
+    PoPLA["PoP LA"]
+    PoPSF["PoP SF"]
+    PoPSEA["PoP SEA"]
+    PoPLON["PoP LON"]
+    PoPFRA["PoP FRA"]
+    PoPPAR["PoP PAR"]
+    PoPTYO["PoP TYO"]
+    PoPSIN["PoP SIN"]
+    PoPSYD["PoP SYD"]
+    Users["Users Worldwide"]
+
+    Origin --> MidUS
+    Origin --> MidEU
+    Origin --> MidAsia
+    MidUS --> PoPLA
+    MidUS --> PoPSF
+    MidUS --> PoPSEA
+    MidEU --> PoPLON
+    MidEU --> PoPFRA
+    MidEU --> PoPPAR
+    MidAsia --> PoPTYO
+    MidAsia --> PoPSIN
+    MidAsia --> PoPSYD
+    PoPLA --> Users
+    PoPSF --> Users
+    PoPSEA --> Users
+    PoPLON --> Users
+    PoPFRA --> Users
+    PoPPAR --> Users
+    PoPTYO --> Users
+    PoPSIN --> Users
+    PoPSYD --> Users
+</div></div>
+
+          <h4>Push vs. Pull CDN</h4>
+          <div class="comparison-grid">
+            <div class="comparison-card">
+              <h4>Pull CDN (Default)</h4>
+<pre><code>How it works:
+  Edge node caches content on first
+  request. Subsequent requests served
+  from cache until TTL expires.
+
+Pros:
+  • Simple — no pre-population needed
+  • Cache only what's actually requested
+  • Efficient for long-tail content
+
+Cons:
+  • First viewer experiences cache miss
+    (higher latency for first request)
+  • Cold start problem for new videos
+
+Best for:
+  99% of videos (long-tail content
+  that may never be requested from
+  a specific PoP)</code></pre>
+            </div>
+            <div class="comparison-card">
+              <h4>Push CDN (Pre-warming)</h4>
+<pre><code>How it works:
+  After transcoding, proactively push
+  video segments to edge nodes in
+  regions where viewers are expected.
+
+Pros:
+  • Zero cache-miss latency
+  • First viewer gets instant playback
+  • Predictable performance
+
+Cons:
+  • Wastes bandwidth/storage if video
+    isn't watched in that region
+  • Complex — need to predict demand
+
+Best for:
+  Top 1% of videos (new uploads from
+  channels with 10M+ subscribers,
+  trending videos, promoted content)</code></pre>
+            </div>
+          </div>
+
+          <div class="info-box note">
+            <strong>Key Insight:</strong> YouTube uses a <strong>hybrid push-pull strategy</strong>. For the vast majority of videos (long-tail), the CDN operates in pull mode &mdash; content is cached on first request. For videos from top creators (channels with millions of subscribers), the system pre-warms the CDN by pushing segments to edge nodes in regions with high subscriber density. This ensures that when a popular creator uploads a new video and millions of subscribers click simultaneously, the CDN is already warm and can serve all requests from edge cache. The prediction of which PoPs to pre-warm is based on the creator&rsquo;s subscriber geography.
+          </div>
+
+          <!-- 6e. Video Deduplication -->
+          <h3>6e. Video Deduplication &mdash; Content-Based Hashing</h3>
+          <p>Duplicate videos waste storage and transcoding resources. A significant percentage of uploads are re-uploads of existing content (re-posted clips, mirrors, slight edits). Content-based hashing detects duplicates before or during transcoding.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    Hash["STEP 1: COMPUTE PERCEPTUAL HASH\nExtract keyframes (1/sec)\nResize to 8x8 grayscale\nCompute DCT, generate 64-bit hash\nCombine into video fingerprint"]
+    Search["STEP 2: SEARCH FINGERPRINT DB\nCompare via Hamming distance\nUsing LSH for fast lookup\n(~800M+ entries)"]
+    Match{"Match found?"}
+    NoMatch["NO MATCH\nProceed with transcoding\nnormally"]
+    YesMatch["MATCH FOUND\nOptions:\n1. Skip transcoding\n   (reuse existing files)\n2. Flag for copyright review\n3. Block upload"]
+
+    Hash --> Search --> Match
+    Match -->|"No"| NoMatch
+    Match -->|"Yes"| YesMatch
+</div></div>
+
+          <!-- 6f. Cost Optimization -->
+          <h3>6f. Cost Optimization &mdash; Intelligent Transcoding and Tiered Storage</h3>
+          <p>At ~1 PB/day of new storage and ~262 PB/day of CDN egress, cost optimization is not optional &mdash; it is an existential concern. Three strategies dramatically reduce costs.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    subgraph Transcode["STRATEGY 1: SELECTIVE TRANSCODING"]
+        T1["TIER 1 — ALL UPLOADS (immediate)\nTranscode: 360p + 720p (H.264)\nCost: 20% of full\nCovers: 90% of viewers"]
+        T2{"Video gets > 1,000 views?"}
+        T3["TIER 2 — POPULAR VIDEOS\nTranscode: 240p + 480p + 1080p (VP9)\nCost: 50% of full\nCovers: 99% of viewers"]
+        T4{"Video gets > 100,000 views?"}
+        T5["TIER 3 — VIRAL VIDEOS\nTranscode: 4K (AV1) + all codecs\nCost: 100% of full\nCovers: 100% of viewers"]
+        T1 --> T2
+        T2 -->|"No"| Done1["Done"]
+        T2 -->|"Yes"| T3
+        T3 --> T4
+        T4 -->|"No"| Done2["Done"]
+        T4 -->|"Yes"| T5
+    end
+
+    subgraph Storage["STRATEGY 3: TIERED STORAGE"]
+        Hot["HOT TIER (S3 Standard)\nVideos &lt; 30 days old\nCost: $0.023/GB/month"]
+        WarmCond{"After 30 days,\nviews &lt; 10/day?"}
+        Warm["WARM TIER (S3 Infrequent Access)\n30 days - 1 year\nCost: $0.0125/GB/month (46% cheaper)"]
+        ColdCond{"After 1 year,\nviews &lt; 1/day?"}
+        Cold["COLD TIER (S3 Glacier)\nVideos &gt; 1 year old\nCost: $0.004/GB/month (83% cheaper)"]
+        Hot --> WarmCond
+        WarmCond -->|"No"| Hot
+        WarmCond -->|"Yes"| Warm
+        Warm --> ColdCond
+        ColdCond -->|"No"| Warm
+        ColdCond -->|"Yes"| Cold
+    end
+</div></div>
+
+          <div class="info-box important">
+            <strong>Cost Is the Hidden Constraint:</strong> In an interview, mentioning cost optimization demonstrates senior-level thinking. &ldquo;The naive approach of transcoding every video to all resolutions and storing everything in hot storage would cost over $100M/year in storage alone. By implementing selective transcoding (only transcode to all resolutions when a video proves popular), using spot instances for encoding (70% compute savings), and tiered storage (62% storage savings), we can reduce total infrastructure cost by 60-70%. This is why YouTube&rsquo;s actual cost structure is dominated by CDN bandwidth, not storage or compute.&rdquo;
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- TRADE-OFFS -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="tradeoffs"></span>
+        <section class="section">
+          <h2>7. Trade-offs</h2>
+
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Decision</th>
+                  <th>Option A</th>
+                  <th>Option B</th>
+                  <th>Recommendation</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>Pre-transcode all resolutions vs. on-demand</strong></td>
+                  <td><strong>Pre-transcode all:</strong> Every video is immediately transcoded to all resolutions and codecs. Viewers always get optimal quality. High upfront compute cost. Wastes resources on videos that are never watched.</td>
+                  <td><strong>On-demand / selective:</strong> Transcode to basic resolutions immediately (360p, 720p). Add higher resolutions only when the video exceeds a view threshold. Saves 60% compute cost. First viewers of a newly popular video may not have 4K available.</td>
+                  <td>Use <strong>selective transcoding</strong>. At 720,000 uploads/day, pre-transcoding all resolutions is prohibitively expensive. Most videos get &lt;100 views and never need 4K. Transcode 360p + 720p immediately (covers 90% of viewers), then add resolutions as demand grows. The 30-minute delay to add 4K for a newly viral video is acceptable.</td>
+                </tr>
+                <tr>
+                  <td><strong>Push vs. Pull CDN</strong></td>
+                  <td><strong>Push CDN:</strong> Pre-warm edge caches by pushing content to PoPs before viewers request it. Zero cache-miss latency. Wastes bandwidth if content isn&rsquo;t requested from that PoP. Requires demand prediction.</td>
+                  <td><strong>Pull CDN:</strong> Edge nodes fetch content from origin on first request, then cache it. Simple, no prediction needed. First viewer experiences cache miss (higher latency). Efficient for long-tail content.</td>
+                  <td>Use <strong>hybrid</strong>. Pull for 99% of videos (long-tail). Push for top 1% (new uploads from channels with &gt;1M subscribers, trending videos). Predict which PoPs to pre-warm based on subscriber geography. This gives instant playback for popular content while avoiding waste on unpopular content.</td>
+                </tr>
+                <tr>
+                  <td><strong>Codec: H.264 vs. VP9 vs. AV1</strong></td>
+                  <td><strong>H.264 only:</strong> Universal device support (99%+). Fast encoding. Larger file sizes (higher bandwidth cost). Proven, simple infrastructure.</td>
+                  <td><strong>Multi-codec (H.264 + VP9 + AV1):</strong> Better compression (30-50% smaller files). Higher encoding cost. Requires codec negotiation in the player. Not all devices support newer codecs.</td>
+                  <td>Use <strong>multi-codec</strong>. The bandwidth savings from VP9/AV1 far outweigh the encoding cost at YouTube&rsquo;s scale. At 262 PB/day egress, a 30% reduction from VP9 saves ~79 PB/day of CDN bandwidth. Encode H.264 for low resolutions (universal fallback), VP9 for mid resolutions, AV1 for 4K. The player selects the best codec the device supports.</td>
+                </tr>
+                <tr>
+                  <td><strong>Storage: Hot-only vs. tiered</strong></td>
+                  <td><strong>Hot storage only:</strong> All videos in S3 Standard. Simple. Fast access for any video. Expensive at scale ($0.023/GB/month &times; 365 PB/year = $100M+/year).</td>
+                  <td><strong>Tiered storage:</strong> Hot (30 days) &rarr; Warm (30d-1yr) &rarr; Cold (1yr+). 62% cost savings. Adds complexity (lifecycle policies, retrieval latency for cold videos). Cold videos take seconds to start playing.</td>
+                  <td>Use <strong>tiered storage</strong>. The cost savings are too significant to ignore. 80% of views go to videos less than 30 days old. Videos older than 1 year with &lt;1 view/day can tolerate a few seconds of initial retrieval latency from cold storage. Implement a &ldquo;warm-up&rdquo; mechanism that moves a cold video back to hot tier if it suddenly gets traffic (e.g., goes viral again).</td>
+                </tr>
+                <tr>
+                  <td><strong>HLS vs. DASH</strong></td>
+                  <td><strong>HLS only:</strong> Native iOS/Safari support. Widely adopted. Apple-controlled standard. Limited codec support historically (H.264 + H.265).</td>
+                  <td><strong>DASH only:</strong> Open standard. Better codec flexibility (VP9, AV1). Native Android/Chrome support. No native iOS support (requires JavaScript player).</td>
+                  <td>Use <strong>both HLS and DASH</strong>. Generate both manifest formats during transcoding (minimal extra cost). Serve HLS to iOS/Safari, DASH to Android/Chrome. This maximizes device coverage and allows each platform to use its optimal codec. YouTube, Netflix, and all major platforms use this dual-protocol approach.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> When discussing trade-offs, always quantify the impact. &ldquo;Selective transcoding saves ~60% of compute cost, which at our scale is $5,000/day. Tiered storage saves 62% of storage cost, which is $5.2M/month. Multi-codec encoding costs 2x more in compute but saves 30-50% in CDN bandwidth, which at 262 PB/day is worth tens of millions per month. Every architectural decision at YouTube&rsquo;s scale has massive cost implications, so we optimize aggressively for the common case while maintaining correctness for edge cases.&rdquo;
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- REVISION CHECKLIST -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="revision"></span>
+        <section class="section">
+          <h2>8. Revision Checklist</h2>
+          <p>Use this checklist to verify you can recall the key concepts before your interview.</p>
+
+          <div class="checklist">
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>The system has two independent flows: <strong>Upload Flow</strong> (creator &rarr; API &rarr; presigned URL &rarr; object storage &rarr; transcoding pipeline &rarr; CDN) and <strong>Streaming Flow</strong> (viewer &rarr; CDN edge &rarr; origin). These scale independently because upload is write-heavy/CPU-intensive while streaming is read-heavy/bandwidth-intensive.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Presigned URLs</strong> enable direct-to-storage uploads, keeping video bytes off the API servers. Combined with <strong>chunked/resumable uploads</strong>, this handles large files (up to 128 GB) over unreliable networks. The API server only manages lightweight metadata.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>The <strong>transcoding pipeline</strong> is modeled as a DAG: inspect &rarr; split &rarr; [parallel encode to 6 resolutions &times; multiple codecs + audio extraction + thumbnail generation] &rarr; manifest generation &rarr; CDN push. DAG parallelism reduces transcoding time by ~6x compared to sequential processing.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Codec strategy:</strong> H.264 for low resolutions (240p-480p, universal compatibility), VP9 for mid resolutions (720p-1080p, 30-40% smaller, royalty-free), AV1 for 4K (50% smaller, critical for bandwidth-heavy content). The player selects the best codec the device supports.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Adaptive bitrate streaming (ABR)</strong> uses HLS/DASH: videos are split into 4-second segments, each available at every quality level. The player measures download speed and switches quality at segment boundaries. Both HLS (.m3u8) and DASH (.mpd) manifests are generated to cover all devices.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>The <strong>CDN</strong> serves 80-95% of streaming traffic from edge nodes. Uses a two-tier cache hierarchy (edge PoPs &rarr; mid-tier regional caches &rarr; origin). Hybrid push-pull strategy: pull for long-tail content, push (pre-warm) for top creators&rsquo; new uploads based on subscriber geography.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Video deduplication</strong> uses perceptual hashing (not file hashing) to detect visually similar uploads. Keyframes are hashed using DCT, and fingerprints are compared via Hamming distance with LSH for fast lookup. Saves ~20% of transcoding resources by reusing existing transcoded files.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Selective transcoding</strong> reduces compute cost by ~60%: Tier 1 (all uploads) = 360p + 720p only. Tier 2 (&gt;1K views) = add 240p, 480p, 1080p. Tier 3 (&gt;100K views) = add 4K + AV1. Only ~5% of videos ever reach Tier 3.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Tiered storage</strong> saves ~62% on storage costs: Hot tier (S3 Standard, 30 days), Warm tier (S3 IA, 30d-1yr, 46% cheaper), Cold tier (S3 Glacier, &gt;1yr, 83% cheaper). Videos are promoted back to hot tier if they suddenly gain traffic.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Spot/preemptible instances</strong> for transcoding save 60-80% on compute. Transcoding is fault-tolerant (retryable), not latency-sensitive, and CPU-intensive &mdash; the ideal workload for spot instances.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>video_stats</strong> is separated from the <strong>videos</strong> table to avoid write contention. View counts are incremented in Redis (batched) and flushed to the database asynchronously. This handles millions of concurrent increments on viral videos without locking the metadata row.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>At <strong>YouTube scale</strong>: 500 hours uploaded/min = 720K videos/day, ~1 PB/day new storage, 1B views/day = ~11.5K concurrent streams, ~57.9 Gbps avg CDN bandwidth (173.5 Gbps peak), ~262 PB/day egress. The dominant costs are CDN bandwidth and object storage, not compute.</span>
+            </label>
+          </div>
+        </section>
+
+        <!-- Bottom nav -->
+        <div class="problem-nav">
+          <a href="search-autocomplete.html"><span class="nav-label">Previous</span><span class="nav-title">Search Autocomplete</span></a>
+          <a href="google-drive.html" class="next"><span class="nav-label">Next</span><span class="nav-title">Google Drive</span></a>
+        </div>
+      </div>
+    </div>
+  </main>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script src="../js/app.js"></script>
+</body>
+</html>

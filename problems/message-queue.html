@@ -1,0 +1,1243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Design Message Queue &mdash; HLD Interview Prep</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+  <nav class="top-nav">
+    <div class="top-nav-inner">
+      <a href="../index.html" class="nav-logo">
+        <div class="nav-logo-icon">SD</div>
+        <span>HLD Interview Prep</span>
+      </a>
+      <div class="nav-actions">
+        <div class="nav-breadcrumb">
+          <a href="../index.html">Home</a>
+          <span class="separator">/</span>
+          <span class="current">Message Queue</span>
+        </div>
+        <button class="theme-toggle" id="theme-toggle">&#x263E;</button>
+      </div>
+    </div>
+  </nav>
+  <div class="scroll-progress"></div>
+
+  <main class="main-content">
+    <div class="problem-page">
+      <!-- Sidebar TOC -->
+      <aside class="sidebar">
+        <div class="sidebar-title">On This Page</div>
+        <ul class="toc-list">
+          <li><a href="#requirements">Requirements</a></li>
+          <li><a href="#estimation">Capacity Estimation</a></li>
+          <li><a href="#api-design">API Design</a></li>
+          <li><a href="#data-model">Data Model</a></li>
+          <li><a href="#high-level-design">High-Level Design</a></li>
+          <li><a href="#deep-dive">Deep Dive</a></li>
+          <li><a href="#tradeoffs">Trade-offs</a></li>
+          <li><a href="#revision">Revision Checklist</a></li>
+        </ul>
+        <div class="progress-bar"><div class="progress-fill" style="width: 0%"></div></div>
+      </aside>
+
+      <div class="problem-content">
+        <!-- Header -->
+        <div class="problem-header">
+          <h1>Design Distributed Message Queue</h1>
+          <p class="problem-subtitle">Design a distributed message queue system like Apache Kafka &mdash; supporting high-throughput publish/subscribe messaging, topic-based partitioning with ordering guarantees, consumer groups for parallel processing, configurable delivery semantics (at-least-once, at-most-once, exactly-once), durable message retention, and horizontal scalability across thousands of brokers.</p>
+          <div class="problem-meta-bar">
+            <span class="meta-badge difficulty-hard">Hard</span>
+            <span class="meta-badge">Messaging</span>
+            <span class="meta-badge">Asked at: LinkedIn, Uber, Confluent</span>
+          </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- REQUIREMENTS -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="requirements"></span>
+        <section class="section">
+          <h2>1. Requirements</h2>
+
+          <h3>Functional Requirements</h3>
+          <ul class="content-list">
+            <li><strong>Producers publish messages to topics</strong> &mdash; Producers send messages to named topics. Each message consists of a key, value, optional headers, and an optional target partition. The system assigns an offset (monotonically increasing sequence number) to each message upon acceptance.</li>
+            <li><strong>Consumers subscribe to topics</strong> &mdash; Consumers subscribe to one or more topics and read messages in order. They track their position (offset) in each partition and can seek to any historical offset within the retention window.</li>
+            <li><strong>Consumer groups for parallel processing</strong> &mdash; Multiple consumers form a consumer group. Each partition in a topic is assigned to exactly one consumer in the group, enabling parallel consumption. When consumers join or leave, partitions are rebalanced across the remaining group members.</li>
+            <li><strong>Message ordering within a partition</strong> &mdash; Messages within a single partition are strictly ordered by offset. Messages with the same key are always routed to the same partition, guaranteeing per-key ordering. No global ordering across partitions.</li>
+            <li><strong>Configurable delivery semantics</strong> &mdash; Support at-least-once (default: consumer may see duplicates on failure), at-most-once (consumer may miss messages on failure), and exactly-once (idempotent producer + transactional API, no duplicates and no loss).</li>
+            <li><strong>Message retention</strong> &mdash; Messages are retained for a configurable duration (e.g., 7 days) or until a size limit is reached, regardless of whether they have been consumed. Consumers can replay historical messages by seeking to an earlier offset.</li>
+          </ul>
+
+          <h3>Non-Functional Requirements</h3>
+          <ul class="content-list">
+            <li><strong>High throughput:</strong> Support millions of messages per second across the cluster. Individual partitions should sustain 10&ndash;50 MB/sec write throughput. The system must handle bursty traffic without backpressure degrading producers.</li>
+            <li><strong>Low latency:</strong> End-to-end produce latency under 10 ms at p99 for acks=1 (leader acknowledgment). Consume latency under 5 ms for caught-up consumers tailing the log.</li>
+            <li><strong>Durability:</strong> No message loss once acknowledged. Messages are replicated to multiple brokers before acknowledgment (when acks=all). Survive single-broker failures without data loss.</li>
+            <li><strong>Horizontal scalability:</strong> Add brokers to increase capacity linearly. Topics can be repartitioned (with care) to distribute load. No single bottleneck &mdash; metadata, data, and coordination all scale independently.</li>
+            <li><strong>Fault tolerance:</strong> Automatic leader election when a broker fails. Consumers rebalance when group members crash. No single point of failure. The system continues operating with degraded capacity during failures.</li>
+          </ul>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> Start by clarifying: &ldquo;Are we designing a message queue (like RabbitMQ &mdash; point-to-point, messages deleted after consumption) or a distributed log (like Kafka &mdash; append-only, retained for days, replayable)?&rdquo; This distinction is critical. A traditional message queue deletes messages after delivery; a distributed log retains them. Kafka&rsquo;s log-based design enables consumer replay, multiple consumer groups reading independently, and stream processing &mdash; which is why it dominates modern architectures. This design follows the Kafka model.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- ESTIMATION -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="estimation"></span>
+        <section class="section">
+          <h2>2. Capacity Estimation</h2>
+
+          <h3>Assumptions</h3>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Parameter</th>
+                  <th>Value</th>
+                  <th>Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Write throughput</td>
+                  <td>1 million messages/sec</td>
+                  <td>Aggregate across all topics and partitions</td>
+                </tr>
+                <tr>
+                  <td>Average message size</td>
+                  <td>1 KB</td>
+                  <td>Includes key, value, headers, and metadata</td>
+                </tr>
+                <tr>
+                  <td>Write bandwidth</td>
+                  <td>1 GB/sec</td>
+                  <td>1M msgs/sec &times; 1 KB = 1 GB/sec</td>
+                </tr>
+                <tr>
+                  <td>Retention period</td>
+                  <td>7 days</td>
+                  <td>Configurable per topic</td>
+                </tr>
+                <tr>
+                  <td>Replication factor</td>
+                  <td>3</td>
+                  <td>Each message stored on 3 brokers</td>
+                </tr>
+                <tr>
+                  <td>Consumer groups per topic</td>
+                  <td>~3 (average)</td>
+                  <td>Multiple independent consumers reading same data</td>
+                </tr>
+                <tr>
+                  <td>Read throughput</td>
+                  <td>3 GB/sec</td>
+                  <td>3 consumer groups &times; 1 GB/sec = 3 GB/sec reads</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>Storage Calculation</h3>
+<pre><code>Raw data per day:
+  1 GB/sec &times; 86,400 sec/day = 86.4 TB/day
+
+7-day retention:
+  86.4 TB/day &times; 7 days = 604.8 TB &asymp; 605 TB
+
+With 3x replication:
+  605 TB &times; 3 = 1,815 TB &asymp; 1.8 PB total storage
+
+Storage per broker (assuming 50 brokers):
+  1.8 PB / 50 brokers = 36 TB per broker
+  &rarr; Each broker needs ~36 TB of disk (4&ndash;6 SSDs or HDDs)
+
+Disk I/O per broker:
+  Write: 1 GB/sec / 50 brokers &times; 3 (replication) = 60 MB/sec writes
+  Read: 3 GB/sec / 50 brokers = 60 MB/sec reads
+  Total: ~120 MB/sec per broker (well within SSD/HDD capabilities)</code></pre>
+
+          <h3>Network Bandwidth</h3>
+<pre><code>Inbound (producers &rarr; brokers):
+  1 GB/sec from producers to leader brokers
+
+Replication traffic (broker &rarr; broker):
+  Each message replicated to 2 followers
+  1 GB/sec &times; 2 = 2 GB/sec inter-broker traffic
+
+Outbound (brokers &rarr; consumers):
+  3 consumer groups &times; 1 GB/sec = 3 GB/sec
+
+Total network throughput:
+  1 + 2 + 3 = 6 GB/sec = 48 Gbps cluster-wide
+
+Per broker (50 brokers):
+  48 Gbps / 50 = ~1 Gbps per broker
+  &rarr; Each broker needs a 10 Gbps NIC (standard in data centers)</code></pre>
+
+          <div class="info-box note">
+            <strong>Key Insight:</strong> The numbers reveal that a distributed message queue is a <strong>storage and I/O problem</strong>, not a compute problem. The CPU cost of routing messages is trivial &mdash; the bottlenecks are disk throughput (sequential writes), network bandwidth (replication + consumer reads), and storage capacity (1.8 PB for 7-day retention). This is why Kafka&rsquo;s design is obsessed with sequential I/O, zero-copy transfers, and page cache utilization &mdash; these optimizations directly address the real bottlenecks.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- API DESIGN -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="api-design"></span>
+        <section class="section">
+          <h2>3. API Design</h2>
+
+          <h3>Producer API</h3>
+          <div class="api-endpoint">
+            <span class="api-method">PRODUCE</span>
+            <span class="api-path">produce(topic, key, value, partition?, headers?)</span>
+            <p>Send a message to a topic. If <code>partition</code> is specified, the message goes to that partition directly. Otherwise, the partition is determined by <code>hash(key) % numPartitions</code>. If <code>key</code> is null, round-robin assignment is used. Returns the assigned partition and offset on success.</p>
+<pre><code>// Synchronous produce (waits for ack)
+ProduceResult result = producer.send(
+  new ProducerRecord("orders", orderId, orderJson)
+).get();
+// result: {topic: "orders", partition: 7, offset: 284619}
+
+// Asynchronous produce (fire-and-callback)
+producer.send(
+  new ProducerRecord("events", userId, eventJson),
+  (metadata, exception) -&gt; {
+    if (exception != null) handleError(exception);
+    else log("Sent to partition " + metadata.partition());
+  }
+);</code></pre>
+          </div>
+
+          <div class="api-endpoint">
+            <span class="api-method">BATCH</span>
+            <span class="api-path">producer.send(records[]) &mdash; Batching &amp; Compression</span>
+            <p>Producers batch multiple messages into a single network request for efficiency. Configurable via <code>batch.size</code> (bytes) and <code>linger.ms</code> (max wait time). Batches can be compressed (gzip, snappy, lz4, zstd) to reduce network and storage overhead.</p>
+<pre><code>// Producer config for batching
+batch.size = 65536        // 64 KB batch buffer
+linger.ms = 5             // Wait up to 5ms to fill batch
+compression.type = "lz4"  // Compress each batch
+acks = "all"              // Wait for all ISR to acknowledge
+retries = 3               // Retry on transient failures
+enable.idempotence = true // Prevent duplicate messages</code></pre>
+          </div>
+
+          <h3>Consumer API</h3>
+          <div class="api-endpoint">
+            <span class="api-method">SUBSCRIBE</span>
+            <span class="api-path">consumer.subscribe(topics[])</span>
+            <p>Subscribe to one or more topics. The consumer joins a consumer group (specified in config). The group coordinator assigns partitions to this consumer. When other consumers join/leave the group, a rebalance redistributes partitions.</p>
+<pre><code>consumer.subscribe(["orders", "payments"]);
+
+// Poll loop — the core consumption pattern
+while (true) {
+  ConsumerRecords records = consumer.poll(Duration.ofMillis(100));
+  for (ConsumerRecord record : records) {
+    process(record.key(), record.value());
+  }
+  consumer.commitSync(); // Commit offsets after processing
+}</code></pre>
+          </div>
+
+          <div class="api-endpoint">
+            <span class="api-method">POLL</span>
+            <span class="api-path">consumer.poll(timeout) &rarr; ConsumerRecords</span>
+            <p>Fetch messages from assigned partitions. Returns a batch of records (up to <code>max.poll.records</code>). The consumer tracks its position (offset) per partition. If no new messages are available, blocks for up to <code>timeout</code> milliseconds.</p>
+          </div>
+
+          <div class="api-endpoint">
+            <span class="api-method">COMMIT</span>
+            <span class="api-path">consumer.commitSync(offsets?) / consumer.commitAsync()</span>
+            <p>Persist the consumer&rsquo;s current offset for each partition. On restart, the consumer resumes from the last committed offset. <code>commitSync</code> blocks until the broker confirms; <code>commitAsync</code> returns immediately. Offsets are stored in a special internal topic (<code>__consumer_offsets</code>).</p>
+          </div>
+
+          <h3>Admin API</h3>
+          <div class="api-endpoint">
+            <span class="api-method">ADMIN</span>
+            <span class="api-path">createTopic(name, partitions, replicationFactor, config?)</span>
+            <p>Create a new topic with the specified number of partitions and replication factor. Optional config overrides (retention.ms, segment.bytes, cleanup.policy). Partitions are distributed across brokers for load balancing.</p>
+<pre><code>admin.createTopic({
+  name: "user-events",
+  partitions: 32,
+  replicationFactor: 3,
+  config: {
+    "retention.ms": 604800000,  // 7 days
+    "segment.bytes": 1073741824, // 1 GB segments
+    "cleanup.policy": "delete"   // or "compact"
+  }
+});</code></pre>
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- DATA MODEL -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="data-model"></span>
+        <section class="section">
+          <h2>4. Data Model</h2>
+
+          <h3>Topic &rarr; Partition &rarr; Segment Hierarchy</h3>
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    Topic["Topic: orders"]
+
+    P0["Partition 0\nLeader: Broker 1\nReplicas: Broker 2, 3"]
+    P1["Partition 1\nLeader: Broker 2\nReplicas: Broker 1, 3"]
+    P2["Partition 2\nLeader: Broker 3\nReplicas: Broker 1, 2"]
+
+    S0a["Segment 0000000000.log\noffsets 0–49,999"]
+    S0b["Segment 000050000.log\noffsets 50,000–99,999"]
+    S0c["Segment 000100000.log\nACTIVE"]
+
+    S0a_idx["0000000000.index\noffset→position"]
+    S0a_ts["0000000000.timeindex\ntimestamp→offset"]
+    S0b_idx["000050000.index"]
+    S0b_ts["000050000.timeindex"]
+    S0c_idx["000100000.index"]
+    S0c_ts["000100000.timeindex"]
+
+    S1a["Segment 0000000000.log"]
+    S2a["Segment 0000000000.log"]
+
+    Topic --> P0
+    Topic --> P1
+    Topic --> P2
+
+    P0 --> S0a
+    P0 --> S0b
+    P0 --> S0c
+    P1 --> S1a
+    P2 --> S2a
+
+    S0a --> S0a_idx
+    S0a --> S0a_ts
+    S0b --> S0b_idx
+    S0b --> S0b_ts
+    S0c --> S0c_idx
+    S0c --> S0c_ts
+          </div></div>
+
+          <h3>Message Format (Record Batch)</h3>
+          <div class="diagram-box">
+<pre>
+    MESSAGE FORMAT (ON DISK)
+    &equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;
+
+    Each message on disk contains:
+
+    ┌─────────────────────────────────────────────────────┐
+    │  RECORD                                             │
+    ├─────────────┬───────────────────────────────────────┤
+    │  Offset     │  8 bytes  &mdash; monotonically increasing  │
+    │             │  sequence number within the partition  │
+    ├─────────────┼───────────────────────────────────────┤
+    │  Timestamp  │  8 bytes  &mdash; CreateTime or LogAppend  │
+    │             │  Time (milliseconds since epoch)      │
+    ├─────────────┼───────────────────────────────────────┤
+    │  Key Size   │  4 bytes  &mdash; length of key (-1 = null)│
+    ├─────────────┼───────────────────────────────────────┤
+    │  Key        │  Variable &mdash; used for partitioning    │
+    │             │  and log compaction                   │
+    ├─────────────┼───────────────────────────────────────┤
+    │  Value Size │  4 bytes  &mdash; length of value          │
+    ├─────────────┼───────────────────────────────────────┤
+    │  Value      │  Variable &mdash; the actual message payload│
+    │             │  (serialized bytes: JSON, Avro, etc.) │
+    ├─────────────┼───────────────────────────────────────┤
+    │  Headers    │  Variable &mdash; key-value metadata pairs │
+    │             │  (tracing IDs, content-type, etc.)    │
+    ├─────────────┼───────────────────────────────────────┤
+    │  CRC-32     │  4 bytes  &mdash; checksum for corruption  │
+    │             │  detection (covers entire record)     │
+    └─────────────┴───────────────────────────────────────┘
+
+    Messages are batched into RECORD BATCHES for efficiency:
+
+    ┌─────────────────────────────────────────────────────┐
+    │  RECORD BATCH (written as a single unit)            │
+    ├─────────────────────────────────────────────────────┤
+    │  Base Offset          │  First offset in this batch │
+    │  Batch Length          │  Total bytes                │
+    │  Magic Byte           │  Format version (2)         │
+    │  Compression          │  none/gzip/snappy/lz4/zstd  │
+    │  Producer ID          │  For idempotent dedup        │
+    │  Producer Epoch       │  For transactions            │
+    │  Base Sequence        │  For idempotent dedup        │
+    │  Record Count         │  Number of records in batch  │
+    │  Records[]            │  The actual messages         │
+    └─────────────────────────────────────────────────────┘
+</pre>
+          </div>
+
+          <h3>Segment Files on Disk</h3>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>File</th>
+                  <th>Purpose</th>
+                  <th>Structure</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>.log</code></td>
+                  <td>The actual message data. Append-only. Sequential writes. Each segment is named by its base offset (e.g., <code>00000000000050000.log</code> starts at offset 50,000).</td>
+                  <td>Concatenated record batches, written sequentially.</td>
+                </tr>
+                <tr>
+                  <td><code>.index</code></td>
+                  <td>Sparse offset index. Maps logical offset &rarr; physical file position in the .log file. Sparse: not every offset is indexed (every Nth offset). Binary search to find nearest entry, then scan forward.</td>
+                  <td>Pairs of (relative_offset: 4B, position: 4B). Fixed 8-byte entries.</td>
+                </tr>
+                <tr>
+                  <td><code>.timeindex</code></td>
+                  <td>Sparse timestamp index. Maps timestamp &rarr; offset. Used for time-based seeking (e.g., &ldquo;replay from 2 hours ago&rdquo;). Enables <code>offsetsForTimes()</code> API.</td>
+                  <td>Pairs of (timestamp: 8B, relative_offset: 4B). Fixed 12-byte entries.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="info-box note">
+            <strong>Why segments?</strong> Splitting a partition into segments enables efficient retention management. When a segment&rsquo;s oldest message exceeds the retention period, the entire segment file is deleted &mdash; a single <code>unlink()</code> syscall. Without segments, deleting old messages from the middle of a single file would require expensive rewriting. Segments also enable efficient binary search for offset lookups: find the right segment by base offset, then binary search the sparse index within that segment.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- HIGH-LEVEL DESIGN -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="high-level-design"></span>
+        <section class="section">
+          <h2>5. High-Level Design</h2>
+
+          <p>The architecture consists of three main components: <strong>Producers</strong> that publish messages, a <strong>Broker Cluster</strong> that stores and replicates messages, and <strong>Consumers</strong> that read messages. A coordination layer (ZooKeeper or KRaft) manages metadata, leader election, and cluster membership.</p>
+
+          <h3>System Architecture</h3>
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    subgraph Producers
+        P1["Producer 1"]
+        P2["Producer 2"]
+        PN["Producer N"]
+    end
+
+    subgraph BrokerCluster["Broker Cluster"]
+        B1["Broker 1\nP0(L) P1(F) P2(F)"]
+        B2["Broker 2\nP0(F) P1(L) P2(F)"]
+        B3["Broker 3\nP0(F) P1(F) P2(L)"]
+        B4["Broker 4\nP3(L) P3(F)"]
+    end
+
+    subgraph ConsumerGroupA["Consumer Group A"]
+        CA1["Consumer 1\n← P0, P1"]
+        CA2["Consumer 2\n← P2, P3"]
+    end
+
+    subgraph ConsumerGroupB["Consumer Group B"]
+        CB3["Consumer 3\n← P0, P1, P2, P3"]
+    end
+
+    subgraph Coordination["Coordination Layer\nZooKeeper / KRaft"]
+        CL["• Cluster membership\n• Topic metadata\n• Leader election\n• Controller election\n• ACLs & quotas"]
+    end
+
+    P1 --> B1
+    P2 --> B2
+    PN --> B3
+
+    B1 --> CA1
+    B2 --> CA1
+    B3 --> CA2
+    B4 --> CA2
+    B1 --> CB3
+    B2 --> CB3
+    B3 --> CB3
+
+    B1 -.- CL
+    B2 -.- CL
+    B3 -.- CL
+    B4 -.- CL
+          </div></div>
+
+          <h3>Key Components</h3>
+          <div class="comparison-grid">
+            <div class="comparison-card">
+              <h4>Broker</h4>
+<pre><code>A broker is a single server in the cluster.
+Each broker:
+• Stores partition replicas on local disk
+• Serves produce requests (if it's the leader)
+• Serves fetch requests (from consumers
+  and follower replicas)
+• Participates in leader election
+• Reports health to the controller
+
+Typical capacity per broker:
+• 10&ndash;50 MB/sec write throughput
+• 100&ndash;200 MB/sec read throughput
+• 1&ndash;10 TB storage
+• 100K+ connections</code></pre>
+            </div>
+            <div class="comparison-card">
+              <h4>Controller</h4>
+<pre><code>One broker is elected as the CONTROLLER.
+The controller:
+• Manages partition leader assignments
+• Detects broker failures (via heartbeats)
+• Triggers leader election when a broker dies
+• Handles topic creation/deletion
+• Manages partition reassignment
+
+In ZooKeeper mode:
+  Controller watches ZK for broker changes.
+  ZK stores all metadata.
+
+In KRaft mode:
+  Controller is a Raft leader.
+  Metadata stored in an internal topic.
+  No external dependency.</code></pre>
+            </div>
+          </div>
+
+          <h3>Message Lifecycle</h3>
+          <div class="flow-container">
+            <div class="flow-box">Producer batches messages</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Leader broker appends to log</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">Followers replicate from leader</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Leader sends ack to producer</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">Consumer fetches from leader</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Consumer commits offset</div>
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- DEEP DIVE -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="deep-dive"></span>
+        <section class="section">
+          <h2>6. Deep Dive</h2>
+
+          <!-- 6a. Partitioning -->
+          <h3>6a. Partitioning &mdash; Parallelism and Ordering</h3>
+          <p>Partitioning is the fundamental mechanism for achieving parallelism in a distributed message queue. A topic is divided into N partitions, each of which is an independent, ordered log. Partitions are distributed across brokers for load balancing.</p>
+
+          <div class="diagram-box">
+<pre>
+    PARTITIONING STRATEGY
+    &equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;
+
+    HOW PARTITION IS CHOSEN:
+    ────────────────────────────────────────────────────────
+
+    Case 1: Key is provided
+      partition = hash(key) % numPartitions
+
+      Example: key = "order-12345"
+      hash("order-12345") = 2038471923
+      2038471923 % 8 = 3
+      &rarr; Message goes to Partition 3
+
+      ALL messages with key "order-12345" go to Partition 3.
+      This guarantees per-key ordering.
+
+    Case 2: Key is null
+      Round-robin across partitions (or sticky partitioner
+      that fills one batch before moving to the next).
+
+    Case 3: Partition explicitly specified
+      Producer directly specifies partition number.
+      Used for custom partitioning logic.
+
+
+    ORDERING GUARANTEE:
+    ────────────────────────────────────────────────────────
+
+    Topic "orders" with 4 partitions:
+
+    Partition 0: [msg1] [msg4] [msg8]  [msg12] &rarr;
+    Partition 1: [msg2] [msg5] [msg9]  [msg13] &rarr;
+    Partition 2: [msg3] [msg6] [msg10] [msg14] &rarr;
+    Partition 3: [msg7] [msg11]                &rarr;
+
+    &bull; WITHIN a partition: strict ordering (msg1 before msg4)
+    &bull; ACROSS partitions: NO ordering guarantee
+      (msg2 in P1 may be processed before msg1 in P0)
+
+    &bull; Per-key ordering: all messages with the same key
+      go to the same partition, so they are ordered.
+      Example: all events for user_id=42 go to P2.
+
+
+    CHOOSING PARTITION COUNT:
+    ────────────────────────────────────────────────────────
+
+    More partitions = more parallelism, but also:
+    &bull; More file handles (3 files per segment per partition)
+    &bull; More memory (index buffers, page cache entries)
+    &bull; Longer leader election time (each partition needs
+      a separate election)
+    &bull; Higher end-to-end latency (more partitions to
+      replicate)
+
+    Rule of thumb:
+    &bull; Target throughput per partition: 10 MB/sec
+    &bull; Desired total throughput: 100 MB/sec
+    &bull; Partitions needed: 100 / 10 = 10 partitions
+    &bull; Account for future growth: 2&ndash;3x = 20&ndash;30 partitions
+    &bull; Typical range: 6&ndash;64 partitions per topic
+    &bull; High-throughput topics: 100&ndash;256 partitions
+</pre>
+          </div>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> A common follow-up question is: &ldquo;What happens if you need to increase the number of partitions?&rdquo; Answer: You can add partitions, but messages with the same key may now hash to a different partition. This breaks per-key ordering for new messages (old messages stay in their original partition). For this reason, it&rsquo;s better to over-provision partitions upfront. Reducing partitions is not supported &mdash; you must create a new topic and migrate data.
+          </div>
+
+          <!-- 6b. Replication -->
+          <h3>6b. Replication &mdash; Durability and Fault Tolerance</h3>
+          <p>Each partition is replicated across multiple brokers. One replica is the <strong>leader</strong> (handles all reads and writes), and the others are <strong>followers</strong> (passively replicate from the leader). The set of replicas that are fully caught up is called the <strong>ISR (In-Sync Replica set)</strong>.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    subgraph Leader["Broker 1 (LEADER)"]
+        L_P0["P0: [0][1][2]...[9]\nLEO = 10"]
+    end
+
+    subgraph Follower1["Broker 2 (FOLLOWER)"]
+        F1_P0["P0: [0][1][2]...[9]\nLEO = 10\nISR: YES (caught up)"]
+    end
+
+    subgraph Follower2["Broker 3 (FOLLOWER)"]
+        F2_P0["P0: [0][1][2]...[8]\nLEO = 9\nISR: YES (within threshold)"]
+    end
+
+    Leader -->|"Replication"| Follower1
+    Leader -->|"Replication"| Follower2
+
+    L_P0 -.->|"HW = min(LEO of ISR) = 9"| HW["High Watermark = 9\nConsumers read up to HW"]
+          </div></div>
+
+          <h3>Acks: The Durability vs. Performance Trade-off</h3>
+          <div class="comparison-grid">
+            <div class="comparison-card">
+              <h4>acks=0 (Fire-and-Forget)</h4>
+<pre><code>Producer does NOT wait for any
+acknowledgment from the broker.
+
+Flow:
+  Producer &rarr; send &rarr; done (no wait)
+
+Durability: NONE
+  Message may be lost if broker crashes
+  before writing to disk.
+
+Latency: Lowest (~0.5 ms)
+Performance: Highest throughput
+
+Use case:
+  Metrics, logs, clickstream data where
+  occasional loss is acceptable.</code></pre>
+            </div>
+            <div class="comparison-card">
+              <h4>acks=1 (Leader Only)</h4>
+<pre><code>Producer waits for the LEADER to write
+the message to its local log.
+
+Flow:
+  Producer &rarr; Leader writes &rarr; ack
+
+Durability: MODERATE
+  Message survives leader restart (on disk).
+  Message LOST if leader dies before
+  followers replicate.
+
+Latency: Low (~2&ndash;5 ms)
+Performance: Good throughput
+
+Use case:
+  Default for most applications.
+  Good balance of durability and speed.</code></pre>
+            </div>
+            <div class="comparison-card">
+              <h4>acks=all (All ISR)</h4>
+<pre><code>Producer waits for ALL in-sync replicas
+to write the message.
+
+Flow:
+  Producer &rarr; Leader writes &rarr;
+  Followers replicate &rarr; all ack &rarr;
+  Leader acks producer
+
+Durability: HIGHEST
+  Message survives any single broker failure.
+  Combined with min.insync.replicas=2,
+  guarantees message is on 2+ brokers.
+
+Latency: Higher (~5&ndash;15 ms)
+Performance: Lower throughput
+
+Use case:
+  Financial transactions, orders, payments.
+  Any data that MUST NOT be lost.</code></pre>
+            </div>
+          </div>
+
+          <div class="info-box important">
+            <strong>Critical config: <code>min.insync.replicas</code>.</strong> With <code>acks=all</code> and <code>min.insync.replicas=2</code> (replication factor 3), the producer&rsquo;s write is acknowledged only when at least 2 replicas (including the leader) have the message. If only 1 replica is in the ISR, the producer receives an error rather than silently reducing durability. This prevents the degenerate case where <code>acks=all</code> with ISR={leader only} is equivalent to <code>acks=1</code>.
+          </div>
+
+          <h3>Leader Election</h3>
+          <div class="diagram-box">
+<pre>
+    LEADER ELECTION ON BROKER FAILURE
+    &equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;
+
+    BEFORE: Broker 1 is leader for Partition 0
+    ISR = {Broker 1 (L), Broker 2, Broker 3}
+
+    ┌──────────┐  ┌──────────┐  ┌──────────┐
+    │ Broker 1 │  │ Broker 2 │  │ Broker 3 │
+    │ P0: L    │  │ P0: F    │  │ P0: F    │
+    │ LEO: 100 │  │ LEO: 100 │  │ LEO: 99  │
+    └──────────┘  └──────────┘  └──────────┘
+
+    Broker 1 CRASHES! Controller detects via heartbeat timeout.
+
+    AFTER: Controller elects Broker 2 as new leader
+    (first ISR member that is alive)
+    ISR = {Broker 2 (L), Broker 3}
+
+    ┌──────────┐  ┌──────────┐  ┌──────────┐
+    │ Broker 1 │  │ Broker 2 │  │ Broker 3 │
+    │  DEAD    │  │ P0: L    │  │ P0: F    │
+    │          │  │ LEO: 100 │  │ LEO: 99  │
+    └──────────┘  └──────────┘  └──────────┘
+
+    Broker 3 catches up: fetches offset 99 from new leader.
+    ISR = {Broker 2 (L), Broker 3}
+
+    When Broker 1 recovers:
+    1. Truncates log to HW at time of crash
+    2. Fetches missing messages from new leader
+    3. Rejoins ISR once fully caught up
+    ISR = {Broker 2 (L), Broker 1, Broker 3}
+
+    UNCLEAN LEADER ELECTION:
+    If ALL ISR members are dead, should we elect an
+    out-of-sync replica? This risks data loss but
+    restores availability.
+    &bull; unclean.leader.election.enable=true: availability &gt; durability
+    &bull; unclean.leader.election.enable=false: durability &gt; availability
+</pre>
+          </div>
+
+          <!-- 6c. Consumer Groups -->
+          <h3>6c. Consumer Groups &mdash; Parallel Consumption</h3>
+          <p>A consumer group is a set of consumers that cooperatively consume a topic. Each partition is assigned to exactly one consumer in the group, ensuring no two consumers in the same group process the same message. Different consumer groups read the same data independently.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    subgraph Topic["Topic: orders (6 partitions)"]
+        P0["P0"]
+        P1["P1"]
+        P2["P2"]
+        P3["P3"]
+        P4["P4"]
+        P5["P5"]
+    end
+
+    subgraph GroupA["Consumer Group A (order processing)"]
+        GA_C1["Consumer 1"]
+        GA_C2["Consumer 2"]
+        GA_C3["Consumer 3"]
+    end
+
+    subgraph GroupB["Consumer Group B (analytics)"]
+        GB_C4["Consumer 4"]
+        GB_C5["Consumer 5"]
+    end
+
+    subgraph GroupC["Consumer Group C (audit)"]
+        GC_C6["Consumer 6"]
+    end
+
+    P0 --> GA_C1
+    P1 --> GA_C1
+    P2 --> GA_C2
+    P3 --> GA_C2
+    P4 --> GA_C3
+    P5 --> GA_C3
+
+    P0 --> GB_C4
+    P1 --> GB_C4
+    P2 --> GB_C4
+    P3 --> GB_C5
+    P4 --> GB_C5
+    P5 --> GB_C5
+
+    P0 --> GC_C6
+    P1 --> GC_C6
+    P2 --> GC_C6
+    P3 --> GC_C6
+    P4 --> GC_C6
+    P5 --> GC_C6
+          </div></div>
+
+          <h3>Consumer Rebalancing</h3>
+          <div class="diagram-box">
+<pre>
+    REBALANCING WHEN CONSUMERS JOIN/LEAVE
+    &equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;
+
+    TRIGGER: Consumer 2 crashes (stops sending heartbeats)
+
+    BEFORE:
+    C1 &larr; P0, P1    C2 &larr; P2, P3    C3 &larr; P4, P5
+
+    REBALANCE PROTOCOL:
+    1. Group coordinator detects C2 is dead
+       (no heartbeat for session.timeout.ms = 10s)
+    2. Coordinator triggers rebalance
+    3. All remaining consumers revoke their partitions
+       and commit offsets
+    4. Coordinator reassigns partitions:
+
+    AFTER (Range Assignor):
+    C1 &larr; P0, P1, P2    C3 &larr; P3, P4, P5
+
+    AFTER (Sticky Assignor &mdash; preferred):
+    C1 &larr; P0, P1, P2    C3 &larr; P4, P5, P3
+    (P0,P1 stay with C1; P4,P5 stay with C3; only P2,P3 move)
+
+
+    REBALANCE IMPACT:
+    ────────────────────────────────────────────────────────
+
+    During rebalance (Eager protocol):
+    &bull; ALL consumers stop processing (stop-the-world)
+    &bull; Duration: 1&ndash;30 seconds depending on group size
+    &bull; No messages are consumed during this window
+
+    Cooperative Incremental Rebalance (modern):
+    &bull; Only affected partitions are revoked
+    &bull; Other consumers continue processing
+    &bull; Much shorter disruption
+    &bull; Two-phase: revoke &rarr; assign (no stop-the-world)
+</pre>
+          </div>
+
+          <!-- 6d. Storage Engine -->
+          <h3>6d. Storage Engine &mdash; Why Kafka Is Fast</h3>
+          <p>The storage engine is the heart of a distributed message queue. Kafka achieves extraordinary throughput not through exotic algorithms, but through a relentless focus on sequential I/O, OS page cache, and zero-copy transfers. Understanding <em>why</em> these matter is critical for the interview.</p>
+
+          <div class="diagram-box">
+<pre>
+    WHY KAFKA IS FAST &mdash; FOUR KEY TECHNIQUES
+    &equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;
+
+    1. APPEND-ONLY LOG (Sequential I/O)
+    ────────────────────────────────────────────────────────
+
+    Traditional DB:  Random writes to update rows in-place
+    Kafka:           Append-only writes to end of log file
+
+    Sequential write: 600 MB/sec (HDD), 2+ GB/sec (SSD)
+    Random write:     100 IOPS &times; 4KB = 0.4 MB/sec (HDD)
+
+    Sequential I/O is 1,500x faster than random I/O on HDD!
+
+    Kafka NEVER modifies existing data. It only appends.
+    This turns disk into a high-throughput medium.
+
+    ┌──────────────────────────────────────────────────┐
+    │  Partition Log File (.log)                        │
+    │                                                  │
+    │  [msg0][msg1][msg2][msg3][msg4][msg5] ← APPEND   │
+    │                                          HERE    │
+    │  Never modified. Never deleted in-place.         │
+    │  Old segments deleted as whole files.             │
+    └──────────────────────────────────────────────────┘
+
+
+    2. OS PAGE CACHE (No Application-Level Cache)
+    ────────────────────────────────────────────────────────
+
+    Kafka does NOT maintain its own in-memory cache.
+    Instead, it relies on the OS page cache.
+
+    When Kafka writes to a file:
+    &bull; Data goes to the OS page cache (RAM)
+    &bull; OS flushes to disk asynchronously
+    &bull; Subsequent reads hit the page cache (no disk I/O)
+
+    Why this is brilliant:
+    &bull; No GC pressure (data is in OS memory, not JVM heap)
+    &bull; No cache invalidation complexity
+    &bull; Survives process restart (page cache persists)
+    &bull; OS is highly optimized for page cache management
+    &bull; Read-after-write is instant (data already in cache)
+
+    For caught-up consumers (tailing the log):
+    &bull; Producer writes &rarr; data enters page cache
+    &bull; Consumer reads &rarr; served from page cache
+    &bull; ZERO disk reads for real-time consumption!
+
+    ┌─────────────────────────────────────────────────┐
+    │  JVM Heap (Kafka process)                       │
+    │  &bull; Minimal: metadata, connections, buffers      │
+    │  &bull; Typically 4&ndash;8 GB                             │
+    └─────────────────────────────────────────────────┘
+    ┌─────────────────────────────────────────────────┐
+    │  OS Page Cache (managed by kernel)              │
+    │  &bull; ALL message data lives here                  │
+    │  &bull; Typically 20&ndash;100+ GB                        │
+    │  &bull; LRU eviction when memory is full             │
+    │  &bull; Caught-up consumers read from here           │
+    └─────────────────────────────────────────────────┘
+    ┌─────────────────────────────────────────────────┐
+    │  Disk (persistent storage)                      │
+    │  &bull; Sequential writes from page cache flush      │
+    │  &bull; Only accessed for historical reads            │
+    │    (consumers far behind the tail)              │
+    └─────────────────────────────────────────────────┘
+
+
+    3. ZERO-COPY TRANSFER (sendfile syscall)
+    ────────────────────────────────────────────────────────
+
+    Traditional data transfer (4 copies, 4 context switches):
+
+    Disk &rarr; Kernel Buffer &rarr; App Buffer &rarr; Socket Buffer &rarr; NIC
+         copy 1         copy 2        copy 3          copy 4
+
+    Zero-copy transfer (2 copies, 2 context switches):
+
+    Disk &rarr; Kernel Buffer ────────────────────────────&rarr; NIC
+         copy 1        (DMA from page cache to NIC)  copy 2
+
+    The sendfile() syscall tells the OS to transfer data
+    directly from the page cache to the network socket,
+    bypassing the application entirely.
+
+    Impact:
+    &bull; 2&ndash;4x improvement in throughput for consumer reads
+    &bull; Dramatically lower CPU usage
+    &bull; Kafka broker barely touches the data it serves
+
+
+    4. BATCHING AND COMPRESSION
+    ────────────────────────────────────────────────────────
+
+    Messages are batched at every layer:
+
+    Producer:
+    &bull; Accumulates messages in a batch buffer
+    &bull; Sends batch as single network request
+    &bull; Compresses entire batch (not individual messages)
+    &bull; Amortizes network round-trip over many messages
+
+    Broker:
+    &bull; Writes entire batch to disk in one sequential write
+    &bull; Stores compressed batch as-is (no decompression)
+    &bull; Replication sends compressed batches
+
+    Consumer:
+    &bull; Fetches large batches in single request
+    &bull; Decompresses on the consumer side
+
+    End-to-end compression:
+    Producer compresses &rarr; Broker stores compressed &rarr;
+    Consumer decompresses
+    Broker NEVER decompresses data (pass-through)!
+</pre>
+          </div>
+
+          <div class="info-box important">
+            <strong>This is the KEY section for interviews.</strong> When asked &ldquo;Why is Kafka fast?&rdquo;, the answer is: (1) append-only sequential I/O turns slow disks into high-throughput devices, (2) OS page cache eliminates application-level caching and GC overhead, (3) zero-copy (sendfile) bypasses the application for consumer reads, and (4) end-to-end batching and compression amortize overhead. These four techniques together allow a single broker to sustain 100+ MB/sec throughput on commodity hardware. The insight is that Kafka treats disk as a feature, not a bottleneck &mdash; sequential disk I/O is faster than random memory access.
+          </div>
+
+          <!-- 6e. Offset Management -->
+          <h3>6e. Offset Management &mdash; Tracking Consumer Progress</h3>
+          <p>Each consumer tracks its position in each assigned partition via an <strong>offset</strong> &mdash; a monotonically increasing integer. The consumer periodically <strong>commits</strong> its current offset to the broker, so it can resume from the right position after a restart.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    subgraph Partition0["Partition 0"]
+        direction LR
+        M0["[0]"] --> M1["[1]"] --> M2["[2]"] --> M3["[3]"] --> M4["[4]"]
+        M4 --> M5["[5]"] --> M6["[6]"] --> M7["[7]"] --> M8["[8]"] --> M9["[9]"]
+    end
+
+    Committed["Committed Offset = 4\nrestart resumes from 5"]
+    Current["Current Position = 7\nfetched but not committed"]
+    LEO["LEO = 10\nlatest message written"]
+
+    Committed --> Current
+    Current --> LEO
+
+    Consumer["Consumer"] -->|"commitSync()"| OffsetTopic["__consumer_offsets topic\nhash(group_id) % 50"]
+    OffsetTopic -->|"Key: (group_id, topic, partition)\nValue: (offset, metadata, timestamp)"| OffsetTopic
+
+    subgraph AtMostOnce["AT-MOST-ONCE (commit before process)"]
+        direction TB
+        AMO1["1. poll() → msgs [5,6,7]"]
+        AMO2["2. commitSync(offset=8)"]
+        AMO3["3. process msgs 5,6,7"]
+        AMO1 --> AMO2 --> AMO3
+    end
+
+    subgraph AtLeastOnce["AT-LEAST-ONCE (commit after process)"]
+        direction TB
+        ALO1["1. poll() → msgs [5,6,7]"]
+        ALO2["2. process msgs 5,6,7"]
+        ALO3["3. commitSync(offset=8)"]
+        ALO1 --> ALO2 --> ALO3
+    end
+          </div></div>
+
+          <div class="info-box note">
+            <strong>Key Insight:</strong> At-least-once delivery is the default and most common choice. The consumer commits offsets <em>after</em> processing, accepting the possibility of reprocessing on failure. The application must be idempotent &mdash; processing the same message twice should produce the same result. Common idempotency strategies: use a unique message ID as a database primary key (INSERT ... ON CONFLICT DO NOTHING), or maintain a processed-message set in Redis.
+          </div>
+
+          <!-- 6f. Exactly-Once Semantics -->
+          <h3>6f. Exactly-Once Semantics &mdash; The Holy Grail</h3>
+          <p>Exactly-once semantics (EOS) means each message is processed exactly once &mdash; no loss, no duplicates. This is achieved through two mechanisms: <strong>idempotent producers</strong> (prevent duplicate writes) and the <strong>transactional API</strong> (atomic read-process-write).</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+sequenceDiagram
+    participant P as Producer (PID=7)
+    participant B as Broker (Leader)
+    participant O as Output Topic
+
+    Note over P,B: Problem — Duplicate on Retry
+
+    P->>B: Send message M
+    B->>B: Write M at offset 100
+    B--xP: ACK lost (timeout)
+    P->>B: Retry send M
+    B->>B: Write M again at offset 101 (DUPLICATE)
+
+    Note over P,B: Solution 1 — Idempotent Producer
+
+    P->>B: Send msg B (PID=7, seq=1)
+    B->>B: Write B at offset 100
+    B--xP: ACK lost (timeout)
+    P->>B: Retry msg B (PID=7, seq=1)
+    B->>B: seq=1 already exists → skip write
+    B-->>P: ACK (idempotent, no duplicate)
+
+    Note over P,O: Solution 2 — Transactional API
+
+    P->>P: initTransactions()
+    loop Read-Process-Write
+        P->>P: poll() → records
+        P->>P: beginTransaction()
+        P->>O: send(output records)
+        P->>B: sendOffsetsToTransaction(offsets)
+        P->>P: commitTransaction()
+    end
+
+    Note over P,O: On failure: abortTransaction()<br/>Output marked aborted, offsets not committed<br/>read_committed consumers skip aborted messages
+          </div></div>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> Exactly-once is often misunderstood. Clarify: &ldquo;Exactly-once in Kafka means exactly-once <em>within the Kafka ecosystem</em>. If your consumer writes to an external database, Kafka cannot guarantee the external write is atomic with the offset commit. For true end-to-end exactly-once with external systems, you need either (a) an idempotent consumer (dedup on the external side) or (b) a two-phase commit protocol (which is complex and slow). Most production systems use at-least-once delivery with idempotent consumers.&rdquo;
+          </div>
+
+          <!-- 6g. ZooKeeper vs KRaft -->
+          <h3>6g. ZooKeeper vs. KRaft &mdash; Metadata Management</h3>
+          <p>Kafka historically relied on Apache ZooKeeper for cluster coordination. Starting with Kafka 3.3 (KIP-833), Kafka introduced <strong>KRaft</strong> (Kafka Raft) to replace ZooKeeper with a built-in Raft-based consensus protocol for metadata management.</p>
+
+          <div class="comparison-grid">
+            <div class="comparison-card">
+              <h4>ZooKeeper (Legacy)</h4>
+<pre><code>External coordination service.
+Kafka stores metadata in ZK:
+&bull; Broker registration (/brokers/ids)
+&bull; Topic config (/config/topics)
+&bull; Partition assignments
+&bull; Controller election
+&bull; Consumer group offsets (old API)
+
+Problems:
+&bull; Separate system to deploy, monitor,
+  and maintain
+&bull; Scalability bottleneck: ZK stores ALL
+  metadata in memory
+&bull; Split-brain risk between Kafka and ZK
+&bull; Slow controller failover (10&ndash;30 sec)
+&bull; ZK watches are expensive at scale
+  (100K+ partitions)
+&bull; Two different security models to manage
+&bull; Operational complexity: two clusters
+  instead of one</code></pre>
+            </div>
+            <div class="comparison-card">
+              <h4>KRaft (Modern)</h4>
+<pre><code>Built-in Raft consensus protocol.
+Metadata stored in an internal topic:
+__cluster_metadata
+
+3&ndash;5 dedicated controller nodes form a
+Raft quorum. One is the active controller;
+others are hot standbys.
+
+Advantages:
+&bull; No external dependency (single system)
+&bull; Faster controller failover (&lt;1 sec)
+&bull; Scales to millions of partitions
+&bull; Metadata replicated via Raft (strong
+  consistency)
+&bull; Simpler operations: one cluster to
+  deploy and monitor
+&bull; Unified security model
+&bull; Event-driven metadata propagation
+  (no polling/watches)
+
+Migration:
+Kafka 3.3+: KRaft production-ready
+Kafka 4.0: ZooKeeper removed entirely</code></pre>
+            </div>
+          </div>
+
+          <div class="info-box note">
+            <strong>Why the migration matters:</strong> ZooKeeper was Kafka&rsquo;s biggest operational pain point and scalability bottleneck. With ZK, controller failover took 10&ndash;30 seconds (during which no leader elections could happen). With KRaft, failover is sub-second. ZK also limited Kafka to ~200K partitions per cluster; KRaft supports millions. In an interview, mention: &ldquo;Kafka is moving from ZooKeeper to KRaft for metadata management. KRaft eliminates the external dependency, reduces operational complexity, and enables faster failover and higher partition counts. This is a major architectural evolution.&rdquo;
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- TRADE-OFFS -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="tradeoffs"></span>
+        <section class="section">
+          <h2>7. Trade-offs</h2>
+
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Decision</th>
+                  <th>Option A</th>
+                  <th>Option B</th>
+                  <th>Recommendation</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>Throughput vs. Latency (Batching)</strong></td>
+                  <td><strong>Large batches (linger.ms=50, batch.size=256KB):</strong> Higher throughput &mdash; fewer network round-trips, better compression ratio, more efficient disk writes. But higher latency: each message waits up to 50 ms to be batched.</td>
+                  <td><strong>Small/no batches (linger.ms=0, batch.size=16KB):</strong> Lower latency &mdash; messages sent immediately. But lower throughput: more network overhead, worse compression, more small disk writes.</td>
+                  <td>Tune per use case. <strong>High-throughput pipelines</strong> (logs, analytics): linger.ms=50&ndash;100, batch.size=256KB. <strong>Low-latency applications</strong> (real-time alerts): linger.ms=0&ndash;5, batch.size=16KB. Most systems use linger.ms=5 as a good default.</td>
+                </tr>
+                <tr>
+                  <td><strong>Durability vs. Performance (Acks)</strong></td>
+                  <td><strong>acks=all + min.insync.replicas=2:</strong> Maximum durability &mdash; message survives any single broker failure. Higher latency (5&ndash;15 ms) due to replication wait. Lower throughput. Producer blocks until all ISR members acknowledge.</td>
+                  <td><strong>acks=1:</strong> Good durability (survives leader restart) with lower latency (2&ndash;5 ms). Risk: message lost if leader dies before replication. <strong>acks=0:</strong> No durability guarantee, maximum throughput.</td>
+                  <td>Use <strong>acks=all</strong> for critical data (orders, payments, financial events). Use <strong>acks=1</strong> for important but recoverable data (user activity, notifications). Use <strong>acks=0</strong> only for truly disposable data (debug logs, metrics where occasional loss is acceptable).</td>
+                </tr>
+                <tr>
+                  <td><strong>Ordering vs. Parallelism</strong></td>
+                  <td><strong>Single partition:</strong> Global ordering of all messages. But zero parallelism &mdash; one consumer processes everything sequentially. Throughput limited to one broker&rsquo;s capacity.</td>
+                  <td><strong>Multiple partitions:</strong> Parallel consumption across consumers. But no global ordering &mdash; only per-partition ordering. Per-key ordering preserved via hash partitioning.</td>
+                  <td>Use <strong>multiple partitions with key-based routing</strong>. Per-key ordering (all events for user X go to the same partition) is sufficient for almost all use cases. True global ordering is rarely needed and doesn&rsquo;t scale. If you need global ordering, use a single partition and accept the throughput limit.</td>
+                </tr>
+                <tr>
+                  <td><strong>Push vs. Pull Consumers</strong></td>
+                  <td><strong>Pull (Kafka model):</strong> Consumer controls the pace &mdash; fetches messages when ready. Natural backpressure: slow consumers don&rsquo;t overwhelm the broker. Consumers can batch fetches for efficiency. Simpler broker (no per-consumer tracking).</td>
+                  <td><strong>Push (RabbitMQ model):</strong> Broker pushes messages to consumers immediately. Lower latency for real-time use cases. But risk of overwhelming slow consumers. Broker must track consumer state and implement flow control.</td>
+                  <td>Use <strong>pull-based consumers</strong> for a Kafka-style system. Pull gives consumers control over their consumption rate, provides natural backpressure, and simplifies the broker. The latency difference is negligible (&lt;5 ms) because caught-up consumers poll continuously with short timeouts. Push is better for traditional message queues (RabbitMQ) where messages are deleted after delivery.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> When discussing trade-offs, frame them as dials, not binary choices: &ldquo;Batching is a dial between throughput and latency. At linger.ms=0, we get minimum latency but lower throughput. At linger.ms=100, we get maximum throughput but 100 ms added latency. The right setting depends on the use case &mdash; a real-time alerting system needs linger.ms=0, while a log aggregation pipeline benefits from linger.ms=100. Similarly, acks is a dial between durability and performance. We tune these per-topic based on the data&rsquo;s criticality.&rdquo;
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- REVISION CHECKLIST -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="revision"></span>
+        <section class="section">
+          <h2>8. Revision Checklist</h2>
+          <p>Use this checklist to verify you can recall the key concepts before your interview.</p>
+
+          <div class="checklist">
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Architecture overview:</strong> Producers &rarr; Broker Cluster &rarr; Consumers. Each topic is split into partitions. Each partition has a leader broker (handles reads/writes) and follower brokers (replicate data). A coordination layer (ZooKeeper or KRaft) manages metadata, leader election, and cluster membership. The controller is a special broker that handles administrative operations.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Partitioning is the key to parallelism.</strong> partition = hash(key) % numPartitions. Messages with the same key always go to the same partition, guaranteeing per-key ordering. No global ordering across partitions. Max parallelism = number of partitions (adding more consumers than partitions gives no benefit). Over-provision partitions upfront because reducing them is not supported.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Replication and ISR:</strong> Each partition is replicated to N brokers (replication factor). ISR = set of replicas that are fully caught up. High watermark (HW) = min(LEO of all ISR members) &mdash; consumers can only read up to HW. Leader election picks the first alive ISR member. min.insync.replicas prevents acks=all from degenerating to acks=1 when ISR shrinks.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Acks trade-off:</strong> acks=0 (fire-and-forget, fastest, may lose data), acks=1 (leader only, good default, loses data if leader dies before replication), acks=all (all ISR, slowest, no data loss with min.insync.replicas=2). Choose based on data criticality.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Consumer groups:</strong> Each partition assigned to exactly one consumer in a group. Different groups read independently. Rebalancing occurs when consumers join/leave &mdash; Cooperative Incremental Rebalance minimizes disruption. More consumers than partitions = idle consumers.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Why Kafka is fast (4 techniques):</strong> (1) Append-only sequential I/O (1,500x faster than random on HDD). (2) OS page cache (no application-level cache, no GC pressure, caught-up consumers read from RAM). (3) Zero-copy sendfile() (data goes from page cache to NIC, bypassing application). (4) End-to-end batching and compression (broker stores compressed batches as-is, never decompresses).</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Storage: Topic &rarr; Partition &rarr; Segments.</strong> Each partition is split into segment files (.log + .index + .timeindex). Segments are rolled at size/time limits. Old segments deleted via unlink() for efficient retention. Sparse index enables binary search for offset lookups.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Offset management:</strong> Consumers track offset per partition. Committed offsets stored in __consumer_offsets topic. Commit-after-process = at-least-once (may reprocess on crash). Commit-before-process = at-most-once (may lose on crash). At-least-once + idempotent consumer is the most common production pattern.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Exactly-once semantics:</strong> Idempotent producer (PID + sequence number) prevents duplicate writes on retry. Transactional API enables atomic read-process-write for stream processing. Exactly-once is within the Kafka ecosystem only &mdash; external systems need idempotent consumers or two-phase commit.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>ZooKeeper vs. KRaft:</strong> ZK is an external dependency with scalability limits (~200K partitions) and slow failover (10&ndash;30s). KRaft is built-in Raft consensus with sub-second failover, millions of partitions, and simpler operations. Kafka 4.0 removes ZK entirely.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Scale numbers:</strong> 1M msgs/sec, 1 KB avg = 1 GB/sec writes. 7-day retention = 605 TB. 3x replication = 1.8 PB. 3 consumer groups = 3 GB/sec reads. 50 brokers at 36 TB each. 1 Gbps NIC per broker. This is a storage and I/O problem, not a compute problem.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Trade-offs as dials:</strong> Throughput vs. latency (batching: linger.ms). Durability vs. performance (acks: 0/1/all). Ordering vs. parallelism (single partition vs. many). Push vs. pull consumers (Kafka uses pull for backpressure and consumer-controlled pacing).</span>
+            </label>
+          </div>
+        </section>
+
+        <!-- Bottom nav -->
+        <div class="problem-nav">
+          <a href="nearby-friends.html"><span class="nav-label">Previous</span><span class="nav-title">Nearby Friends</span></a>
+          <a href="metrics-monitoring.html" class="next"><span class="nav-label">Next</span><span class="nav-title">Metrics Monitoring</span></a>
+        </div>
+      </div>
+    </div>
+  </main>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script src="../js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Design Workflow Orchestration — HLD Interview Prep</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+  <nav class="top-nav">
+    <div class="top-nav-inner">
+      <a href="../index.html" class="nav-logo">
+        <div class="nav-logo-icon">SD</div>
+        <span>HLD Interview Prep</span>
+      </a>
+      <div class="nav-actions">
+        <div class="nav-breadcrumb">
+          <a href="../index.html">Home</a>
+          <span class="separator">/</span>
+          <span class="current">Workflow Orchestration</span>
+        </div>
+        <button class="theme-toggle" id="theme-toggle">&#x263E;</button>
+      </div>
+    </div>
+  </nav>
+  <div class="scroll-progress"></div>
+
+  <main class="main-content">
+    <div class="problem-page">
+      <aside class="sidebar">
+        <div class="sidebar-title">On This Page</div>
+        <ul class="toc-list">
+          <li><a href="#requirements">Requirements</a></li>
+          <li><a href="#estimation">Capacity Estimation</a></li>
+          <li><a href="#api-design">API Design</a></li>
+          <li><a href="#data-model">Data Model</a></li>
+          <li><a href="#high-level-design">High-Level Design</a></li>
+          <li><a href="#deep-dive">Deep Dive</a></li>
+          <li><a href="#tradeoffs">Trade-offs</a></li>
+          <li><a href="#revision">Revision Checklist</a></li>
+        </ul>
+        <div class="progress-bar"><div class="progress-fill" style="width: 0%"></div></div>
+      </aside>
+
+      <div class="problem-content">
+        <div class="problem-header">
+          <h1>Design a Workflow Orchestration System</h1>
+          <p class="problem-subtitle">Design a distributed workflow orchestration platform like Apache Airflow or Databricks Workflows that schedules, executes, and monitors complex multi-step data pipelines and ETL jobs with dependency management, retries, and observability.</p>
+          <div class="problem-meta-bar">
+            <span class="meta-badge difficulty-hard">Hard</span>
+            <span class="meta-badge">Data Platform</span>
+            <span class="meta-badge">Asked at: Databricks, Airbnb, Uber</span>
+          </div>
+        </div>
+
+        <span class="section-anchor" id="requirements"></span>
+        <section class="section">
+          <h2>1. Requirements</h2>
+
+          <h3>Functional Requirements</h3>
+          <ul class="content-list">
+            <li><strong>DAG definition</strong> — Users define workflows as Directed Acyclic Graphs (DAGs) where nodes are tasks and edges are dependencies. Example: "Extract data from S3, transform it, load into warehouse, then send alert."</li>
+            <li><strong>Scheduling</strong> — DAGs can be triggered on a cron schedule (e.g., "every hour"), by external events (new file in S3), or manually via API.</li>
+            <li><strong>Task execution</strong> — Tasks run on distributed workers. The system manages resource allocation, queues tasks, and tracks execution state (pending, running, success, failed).</li>
+            <li><strong>Retry &amp; error handling</strong> — Failed tasks are automatically retried with configurable backoff. DAGs support branching on failure (send alert, run cleanup task, skip downstream).</li>
+            <li><strong>Observability</strong> — Real-time dashboard showing DAG runs, task status, logs, execution times, and SLA tracking.</li>
+          </ul>
+
+          <h3>Non-Functional Requirements</h3>
+          <ul class="content-list">
+            <li><strong>Scalability:</strong> Support 100K+ DAGs, 1M+ tasks per day, 10K+ concurrent task executions.</li>
+            <li><strong>Reliability:</strong> No task execution can be lost. If a worker crashes, the task must be rescheduled on another worker.</li>
+            <li><strong>Low scheduling latency:</strong> Tasks should be scheduled within 5 seconds of their dependencies completing.</li>
+            <li><strong>Multi-tenancy:</strong> Different teams can define their own DAGs with resource isolation and access control.</li>
+          </ul>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> Databricks built its workflow system on top of Apache Airflow but heavily modified it for their data platform. Focus on the DAG scheduler — how do you determine which tasks are ready to run? How do you handle a worker crashing mid-task? The key insight is separating the scheduler (control plane) from the workers (data plane).
+          </div>
+        </section>
+
+        <span class="section-anchor" id="estimation"></span>
+        <section class="section">
+          <h2>2. Capacity Estimation</h2>
+
+          <h3>Assumptions</h3>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr><th>Parameter</th><th>Value</th><th>Notes</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>Total DAGs</td><td>100,000</td><td>Across all teams</td></tr>
+                <tr><td>Tasks per day</td><td>1 million</td><td>Average 10 tasks per DAG run</td></tr>
+                <tr><td>Concurrent tasks</td><td>10,000</td><td>Peak simultaneous executions</td></tr>
+                <tr><td>Average task duration</td><td>5 minutes</td><td>Mix of quick and long-running</td></tr>
+                <tr><td>Worker pool</td><td>500 workers</td><td>20 concurrent tasks per worker</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+<pre><code>Scheduler:
+  DAGs to check per minute   = 100K / 60 ≈ 1,700 DAGs/min
+  Ready tasks per minute     = 1M / 1,440 ≈ 700 tasks/min
+  Scheduler heartbeats       = every 5 seconds (12/min)
+
+Worker throughput:
+  Concurrent tasks           = 10,000
+  Tasks per worker           = 20
+  Workers needed             = 10,000 / 20 = 500 workers
+
+Storage:
+  Per task execution log     = ~10 KB (stdout, stderr, metadata)
+  Daily log storage          = 1M × 10 KB = 10 GB/day
+  Task state in DB           = ~500 bytes per task = 500 MB/day</code></pre>
+        </section>
+
+        <span class="section-anchor" id="api-design"></span>
+        <section class="section">
+          <h2>3. API Design</h2>
+
+          <div class="api-endpoint">
+            <div class="api-endpoint-header">
+              <span class="api-method post">POST</span>
+              <span class="api-path">/v1/dags</span>
+            </div>
+            <div class="api-endpoint-body">
+              <p>Register a new DAG definition (tasks, dependencies, schedule).</p>
+<pre><code>{
+  "dag_id": "daily_etl_pipeline",
+  "schedule": "0 2 * * *",           // 2 AM daily
+  "timezone": "UTC",
+  "tasks": [
+    {"task_id": "extract", "type": "spark", "config": {...}},
+    {"task_id": "transform", "type": "spark", "depends_on": ["extract"]},
+    {"task_id": "load", "type": "sql", "depends_on": ["transform"]},
+    {"task_id": "alert", "type": "email", "depends_on": ["load"]}
+  ],
+  "retry_policy": {"max_retries": 3, "backoff": "exponential"}
+}</code></pre>
+            </div>
+          </div>
+
+          <div class="api-endpoint">
+            <div class="api-endpoint-header">
+              <span class="api-method post">POST</span>
+              <span class="api-path">/v1/dags/{dag_id}/trigger</span>
+            </div>
+            <div class="api-endpoint-body">
+              <p>Manually trigger a DAG run with optional configuration overrides.</p>
+            </div>
+          </div>
+
+          <div class="api-endpoint">
+            <div class="api-endpoint-header">
+              <span class="api-method get">GET</span>
+              <span class="api-path">/v1/dags/{dag_id}/runs/{run_id}/tasks</span>
+            </div>
+            <div class="api-endpoint-body">
+              <p>Get status of all tasks in a DAG run.</p>
+            </div>
+          </div>
+        </section>
+
+        <span class="section-anchor" id="data-model"></span>
+        <section class="section">
+          <h2>4. Data Model</h2>
+
+          <div class="diagram-box"><pre>
+┌─────────────────────────────────────────────────────────────────────┐
+│                        DAGS (PostgreSQL)                            │
+├──────────────┬──────────────────────────────────────────────────────┤
+│ dag_id       │ VARCHAR PK                                         │
+│ owner        │ UUID — team/user                                   │
+│ schedule     │ VARCHAR — cron expression or null (event-driven)   │
+│ task_graph   │ JSONB — serialized DAG structure                   │
+│ retry_policy │ JSONB — max_retries, backoff, timeout              │
+│ is_active    │ BOOLEAN                                            │
+│ created_at   │ TIMESTAMP                                         │
+└──────────────┴──────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                    DAG_RUNS (PostgreSQL)                            │
+├──────────────┬──────────────────────────────────────────────────────┤
+│ run_id       │ UUID PK                                            │
+│ dag_id       │ VARCHAR FK                                         │
+│ status       │ ENUM — queued, running, success, failed            │
+│ triggered_by │ ENUM — schedule, manual, event                    │
+│ started_at   │ TIMESTAMP                                         │
+│ finished_at  │ TIMESTAMP                                         │
+│ config       │ JSONB — runtime overrides                          │
+└──────────────┴──────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                  TASK_INSTANCES (PostgreSQL)                        │
+├──────────────┬──────────────────────────────────────────────────────┤
+│ task_id      │ UUID PK                                            │
+│ run_id       │ UUID FK — references dag_runs                     │
+│ dag_id       │ VARCHAR                                            │
+│ task_name    │ VARCHAR — task in the DAG                         │
+│ status       │ ENUM — pending, queued, running, success, failed  │
+│ worker_id    │ VARCHAR — assigned worker                         │
+│ retry_count  │ INT                                               │
+│ started_at   │ TIMESTAMP                                         │
+│ finished_at  │ TIMESTAMP                                         │
+│ log_url      │ VARCHAR — S3 path to execution logs               │
+└──────────────┴──────────────────────────────────────────────────────┘
+          </pre></div>
+        </section>
+
+        <span class="section-anchor" id="high-level-design"></span>
+        <section class="section">
+          <h2>5. High-Level Design</h2>
+
+          <h3>Architecture Overview</h3>
+          <div class="mermaid-container">
+            <div class="mermaid-title">Workflow Orchestration Architecture</div>
+            <div class="mermaid">
+graph TD
+    UI[Dashboard UI] --> API[REST API]
+    API --> SCHED[Scheduler]
+    SCHED --> DB[(PostgreSQL)]
+    SCHED --> QUEUE[Task Queue - Redis]
+    QUEUE --> W1[Worker Pool 1]
+    QUEUE --> W2[Worker Pool 2]
+    QUEUE --> W3[Worker Pool N]
+    W1 --> EXEC[Execute Task]
+    W2 --> EXEC
+    W3 --> EXEC
+    EXEC --> S3[S3 - Logs]
+    EXEC --> DB
+    SCHED --> HEARTBEAT[Heartbeat Monitor]
+    HEARTBEAT -->|Worker crash| SCHED
+            </div>
+          </div>
+
+          <h3>Scheduler Decision Loop</h3>
+          <div class="mermaid-container">
+            <div class="mermaid-title">Task Scheduling Logic</div>
+            <div class="mermaid">
+graph TD
+    CRON[Cron Trigger] --> PARSE[Parse Schedule]
+    PARSE -->|Due| CREATE[Create DAG Run]
+    EVENT[External Event] --> CREATE
+    CREATE --> TOPO[Topological Sort Tasks]
+    TOPO --> CHECK{Dependencies Met?}
+    CHECK -->|No| WAIT[Wait]
+    CHECK -->|Yes| QUEUE2[Enqueue to Redis]
+    QUEUE2 --> ASSIGN[Assign to Worker]
+    ASSIGN --> RUN[Execute]
+    RUN -->|Success| UPDATE[Update Status]
+    RUN -->|Failed| RETRY{Retries Left?}
+    RETRY -->|Yes| BACKOFF[Exponential Backoff]
+    BACKOFF --> QUEUE2
+    RETRY -->|No| FAIL[Mark Failed]
+    UPDATE --> NEXT[Check Downstream Tasks]
+    NEXT --> CHECK
+            </div>
+          </div>
+        </section>
+
+        <span class="section-anchor" id="deep-dive"></span>
+        <section class="section">
+          <h2>6. Deep Dive</h2>
+
+          <h3>Exactly-Once Task Execution</h3>
+          <p>The hardest problem is ensuring a task runs exactly once, even if the worker crashes mid-execution. We use a lease-based approach:</p>
+
+<pre><code>// Worker picks up a task with a lease
+function acquireTask(workerId) {
+  // Atomic: only one worker can claim a task
+  result = db.execute(`
+    UPDATE task_instances 
+    SET status = 'running', worker_id = $1, lease_expiry = NOW() + INTERVAL '10 minutes'
+    WHERE task_id = (
+      SELECT task_id FROM task_instances 
+      WHERE status = 'queued' 
+      ORDER BY created_at 
+      LIMIT 1 
+      FOR UPDATE SKIP LOCKED
+    )
+    RETURNING *
+  `, workerId);
+  return result;
+}
+
+// Heartbeat to extend lease
+function heartbeat(taskId, workerId) {
+  db.execute(`
+    UPDATE task_instances 
+    SET lease_expiry = NOW() + INTERVAL '10 minutes'
+    WHERE task_id = $1 AND worker_id = $2
+  `, taskId, workerId);
+}
+
+// Scheduler reclaims expired leases
+function reclaimExpiredTasks() {
+  db.execute(`
+    UPDATE task_instances 
+    SET status = 'queued', worker_id = NULL
+    WHERE status = 'running' AND lease_expiry < NOW()
+  `);
+}</code></pre>
+
+          <h3>Task Priority &amp; Fair Scheduling</h3>
+          <p>Multiple teams share the same worker pool. We use weighted fair queuing to ensure no single team monopolizes resources.</p>
+
+          <div class="mermaid-container">
+            <div class="mermaid-title">Priority Queue Design</div>
+            <div class="mermaid">
+graph TD
+    T1[Team A Tasks] --> WQ[Weighted Queue]
+    T2[Team B Tasks] --> WQ
+    T3[Team C Tasks] --> WQ
+    WQ -->|40% weight| W1[Worker Pool]
+    WQ -->|30% weight| W1
+    WQ -->|30% weight| W1
+            </div>
+          </div>
+        </section>
+
+        <span class="section-anchor" id="tradeoffs"></span>
+        <section class="section">
+          <h2>7. Trade-offs</h2>
+
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr><th>Decision</th><th>Option A</th><th>Option B</th><th>Recommendation</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>Scheduler Architecture</strong></td>
+                  <td><strong>Single active scheduler:</strong> Simple. All scheduling decisions in one place. Limited throughput (~10K DAGs). Single point of failure.</td>
+                  <td><strong>Distributed schedulers:</strong> Higher throughput. Complex coordination (leader election, partition assignment). Better fault tolerance.</td>
+                  <td>Use <strong>active-standby with leader election</strong>. One scheduler is active (makes all decisions), standby takes over on failure. Partition DAGs across multiple schedulers if single scheduler is a bottleneck.</td>
+                </tr>
+                <tr>
+                  <td><strong>Task Queue</strong></td>
+                  <td><strong>Redis lists:</strong> Simple push/pop. Fast. No persistence (tasks lost on Redis crash).</td>
+                  <td><strong>Kafka topics:</strong> Durable. Ordered. More complex. Higher latency than Redis.</td>
+                  <td>Use <strong>Redis as primary queue</strong> with PostgreSQL as source of truth. If Redis loses tasks, the scheduler can re-enqueue from PostgreSQL. Best of both worlds.</td>
+                </tr>
+                <tr>
+                  <td><strong>Worker Model</strong></td>
+                  <td><strong>Long-lived workers:</strong> Tasks run on pre-allocated workers. Fast startup. Wasted resources during idle.</td>
+                  <td><strong>Ephemeral containers:</strong> Spin up a container per task. Better isolation. Higher startup latency (30-60s).</td>
+                  <td>Use <strong>long-lived worker pools</strong> for short tasks (&lt;5 min) and <strong>ephemeral containers</strong> for long-running or resource-intensive tasks (Spark jobs, ML training).</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <span class="section-anchor" id="revision"></span>
+        <section class="section">
+          <h2>8. Revision Checklist</h2>
+          <p>Use this checklist to verify you can recall the key concepts before your interview.</p>
+
+          <div class="checklist">
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>DAG execution model:</strong> Tasks are nodes, dependencies are edges. Topological sort determines execution order. A task is "ready" when all upstream dependencies are "success". The scheduler continuously checks for ready tasks.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Lease-based task execution:</strong> Workers acquire a time-limited lease on tasks. If the worker crashes (no heartbeat), the lease expires and the scheduler re-queues the task. Uses PostgreSQL SELECT FOR UPDATE SKIP LOCKED for atomic claiming.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Scheduler heartbeat:</strong> The scheduler polls every 5 seconds. It checks: (1) which DAGs are due to run, (2) which tasks have completed dependencies, (3) which worker leases have expired. This is the control plane.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Retry with exponential backoff:</strong> Failed tasks retry with increasing delays (1s, 2s, 4s, 8s). Max retries configurable per DAG. After max retries, mark task failed and trigger failure branch (alert, cleanup).</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Scale numbers:</strong> 100K DAGs, 1M tasks/day, 10K concurrent tasks, 500 workers, 5-second scheduling latency, 10 GB/day log storage.</span>
+            </label>
+          </div>
+        </section>
+
+        <div class="problem-nav">
+          <a href="collaborative-editor.html"><span class="nav-label">Previous</span><span class="nav-title">Collaborative Editor</span></a>
+          <a href="data-lakehouse.html" class="next"><span class="nav-label">Next</span><span class="nav-title">Data Lakehouse</span></a>
+        </div>
+      </div>
+    </div>
+  </main>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script src="../js/app.js"></script>
+</body>
+</html>

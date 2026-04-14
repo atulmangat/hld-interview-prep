@@ -1,0 +1,1155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Design Payment System &mdash; HLD Interview Prep</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+  <nav class="top-nav">
+    <div class="top-nav-inner">
+      <a href="../index.html" class="nav-logo">
+        <div class="nav-logo-icon">SD</div>
+        <span>HLD Interview Prep</span>
+      </a>
+      <div class="nav-actions">
+        <div class="nav-breadcrumb">
+          <a href="../index.html">Home</a>
+          <span class="separator">/</span>
+          <span class="current">Payment System</span>
+        </div>
+        <button class="theme-toggle" id="theme-toggle">&#x263E;</button>
+      </div>
+    </div>
+  </nav>
+  <div class="scroll-progress"></div>
+
+  <main class="main-content">
+    <div class="problem-page">
+      <!-- Sidebar TOC -->
+      <aside class="sidebar">
+        <div class="sidebar-title">On This Page</div>
+        <ul class="toc-list">
+          <li><a href="#requirements">Requirements</a></li>
+          <li><a href="#estimation">Capacity Estimation</a></li>
+          <li><a href="#api-design">API Design</a></li>
+          <li><a href="#data-model">Data Model</a></li>
+          <li><a href="#high-level-design">High-Level Design</a></li>
+          <li><a href="#deep-dive">Deep Dive</a></li>
+          <li><a href="#tradeoffs">Trade-offs</a></li>
+          <li><a href="#revision">Revision Checklist</a></li>
+        </ul>
+        <div class="progress-bar"><div class="progress-fill" style="width: 0%"></div></div>
+      </aside>
+
+      <div class="problem-content">
+        <!-- Header -->
+        <div class="problem-header">
+          <h1>Design a Payment System</h1>
+          <p class="problem-subtitle">Design a scalable and reliable payment processing system &mdash; supporting multiple payment methods (credit card, debit card, UPI, digital wallets), refund processing, real-time payment status tracking, transaction history, multi-currency support, and integration with external payment gateways like Stripe and PayPal. The system must guarantee exactly-once payment processing to prevent double charges.</p>
+          <div class="problem-meta-bar">
+            <span class="meta-badge difficulty-hard">Hard</span>
+            <span class="meta-badge">Platform</span>
+            <span class="meta-badge">Asked at: Stripe, PayPal, Square</span>
+          </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- REQUIREMENTS -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="requirements"></span>
+        <section class="section">
+          <h2>1. Requirements</h2>
+
+          <h3>Functional Requirements</h3>
+          <ul class="content-list">
+            <li><strong>Accept payments via multiple methods</strong> &mdash; Support credit cards, debit cards, UPI, and digital wallets (Apple Pay, Google Pay). The system must route each payment to the appropriate payment gateway based on method and region.</li>
+            <li><strong>Process refunds</strong> &mdash; Support full and partial refunds. Refunds must be idempotent and traceable back to the original payment. Refund status must be tracked independently from the original payment.</li>
+            <li><strong>Payment status tracking</strong> &mdash; Provide real-time status updates for every payment: created &rarr; processing &rarr; authorized &rarr; captured &rarr; settled (or failed/cancelled). Clients can poll or receive webhooks for status changes.</li>
+            <li><strong>Transaction history</strong> &mdash; Maintain a complete, immutable history of all payment events for every transaction. Support querying by user, merchant, date range, status, and payment method.</li>
+            <li><strong>Multi-currency support</strong> &mdash; Accept payments in 100+ currencies. Perform currency conversion at the time of payment using real-time exchange rates. Display amounts in both the payer&rsquo;s and merchant&rsquo;s currencies.</li>
+            <li><strong>Integration with payment gateways</strong> &mdash; Integrate with multiple external gateways (Stripe, PayPal, Adyen, etc.). Abstract gateway-specific APIs behind a unified internal interface. Support failover to a secondary gateway if the primary is unavailable.</li>
+          </ul>
+
+          <h3>Non-Functional Requirements</h3>
+          <ul class="content-list">
+            <li><strong>Exactly-once payment processing:</strong> The single most critical requirement. A customer must never be charged twice for the same payment, even if the client retries due to network timeouts. This is achieved through idempotency keys and transactional guarantees.</li>
+            <li><strong>Availability:</strong> 99.99% uptime (52 minutes of downtime per year). Payment systems are revenue-critical &mdash; every minute of downtime directly translates to lost sales.</li>
+            <li><strong>PCI DSS compliance:</strong> Never store raw credit card numbers. Use tokenization via the payment gateway. Encrypt all sensitive data at rest and in transit. Maintain audit trails for all access to payment data.</li>
+            <li><strong>Latency:</strong> &lt;500ms for payment processing (from request to gateway response). &lt;100ms for payment status queries. Users abandon checkout if payment takes too long.</li>
+            <li><strong>Throughput:</strong> 1 million transactions per day (~12 TPS average, ~120 TPS peak during flash sales). The system must handle 10x traffic spikes without degradation.</li>
+            <li><strong>Audit trail:</strong> Every state change, every retry, every gateway interaction must be logged immutably. Financial regulators require the ability to reconstruct the complete history of any transaction.</li>
+          </ul>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> Start by asking: &ldquo;Are we building a payment gateway (like Stripe) or a payment service that uses existing gateways?&rdquo; These are very different systems. A payment gateway directly interfaces with card networks (Visa, Mastercard) and banks &mdash; this requires PCI Level 1 certification and is extremely complex. A payment service (what most companies build) orchestrates payments through existing gateways. This design focuses on the payment service. Also clarify: &ldquo;Do we need to support subscriptions and recurring payments, or just one-time payments?&rdquo; We focus on one-time payments here.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- ESTIMATION -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="estimation"></span>
+        <section class="section">
+          <h2>2. Capacity Estimation</h2>
+
+          <h3>Assumptions</h3>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Parameter</th>
+                  <th>Value</th>
+                  <th>Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Transactions per day</td>
+                  <td>1,000,000</td>
+                  <td>Across all merchants and payment methods</td>
+                </tr>
+                <tr>
+                  <td>Average TPS</td>
+                  <td>~12 TPS</td>
+                  <td>1M / 86,400 &asymp; 12 TPS</td>
+                </tr>
+                <tr>
+                  <td>Peak TPS</td>
+                  <td>~120 TPS</td>
+                  <td>10x average during flash sales, Black Friday</td>
+                </tr>
+                <tr>
+                  <td>Average transaction size</td>
+                  <td>$50</td>
+                  <td>Varies widely by merchant vertical</td>
+                </tr>
+                <tr>
+                  <td>Daily GMV</td>
+                  <td>$50,000,000</td>
+                  <td>1M &times; $50 = $50M gross merchandise value</td>
+                </tr>
+                <tr>
+                  <td>Refund rate</td>
+                  <td>~5%</td>
+                  <td>50K refunds/day</td>
+                </tr>
+                <tr>
+                  <td>Transaction record size</td>
+                  <td>~500 bytes</td>
+                  <td>Payment record + metadata + gateway response</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>Storage Calculation</h3>
+<pre><code>DAILY STORAGE:
+  1M transactions &times; 500 bytes = 500 MB/day
+  + Ledger entries (2 per transaction): 1M &times; 2 &times; 200 bytes = 400 MB/day
+  + Payment events (avg 4 per transaction): 1M &times; 4 &times; 150 bytes = 600 MB/day
+  ────────────────────────────
+  Total: ~1.5 GB/day
+
+YEARLY STORAGE:
+  1.5 GB/day &times; 365 = ~550 GB/year
+
+5-YEAR STORAGE:
+  550 GB &times; 5 = ~2.75 TB
+  With indexes and replicas (3x): ~8.25 TB
+
+  This is very manageable &mdash; payment systems are NOT
+  storage-heavy. The challenge is correctness, not scale.
+
+REVENUE CONTEXT:
+  $50M/day GMV &times; 365 = $18.25B/year GMV
+  At 2.9% + $0.30 processing fee:
+    Revenue = 1M &times; ($50 &times; 0.029 + $0.30) = $1.75M/day</code></pre>
+
+          <div class="info-box note">
+            <strong>Key Insight:</strong> Unlike systems like metrics monitoring or video streaming, a payment system is <strong>NOT a scale problem</strong>. 12 TPS average is trivial for any modern database. The real challenge is <strong>correctness</strong>: ensuring exactly-once processing, maintaining a consistent ledger, handling partial failures gracefully, and complying with financial regulations. In an interview, don&rsquo;t spend too much time on scaling &mdash; focus on idempotency, the ledger, and failure handling. These are what interviewers at Stripe and PayPal care about.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- API DESIGN -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="api-design"></span>
+        <section class="section">
+          <h2>3. API Design</h2>
+
+          <h3>Initiate Payment</h3>
+          <div class="api-endpoint">
+            <span class="method post">POST</span>
+            <span class="path">/api/v1/payments</span>
+          </div>
+<pre><code>Headers:
+  Authorization: Bearer &lt;token&gt;
+  Idempotency-Key: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"   ← CRITICAL
+
+Request Body:
+{
+  "amount": 4999,                    // Amount in smallest currency unit (cents)
+  "currency": "USD",                 // ISO 4217 currency code
+  "payment_method": {
+    "type": "credit_card",
+    "token": "tok_visa_4242"         // Tokenized card (never raw card number!)
+  },
+  "merchant_id": "merch_abc123",
+  "description": "Order #12345",
+  "metadata": {
+    "order_id": "order_12345",
+    "customer_email": "user@example.com"
+  },
+  "capture": true                    // true = auth+capture, false = auth only
+}
+
+Response (201 Created):
+{
+  "id": "pay_9x8y7z6w5v4u",
+  "status": "captured",              // or "authorized" if capture=false
+  "amount": 4999,
+  "currency": "USD",
+  "payment_method": "credit_card",
+  "gateway": "stripe",
+  "gateway_transaction_id": "ch_3MqBL...",
+  "idempotency_key": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "created_at": "2024-01-15T10:30:00Z"
+}</code></pre>
+
+          <div class="info-box important">
+            <strong>Idempotency-Key header is the most important design decision in this API.</strong> The client generates a unique key (UUID) for each payment intent and sends it in the header. If the same key is sent again (due to retry after timeout), the server returns the cached response from the first request instead of processing a new payment. This prevents double charging. The key is stored in the database alongside the payment record. Without this, a network timeout followed by a client retry would charge the customer twice.
+          </div>
+
+          <h3>Get Payment Status</h3>
+          <div class="api-endpoint">
+            <span class="method get">GET</span>
+            <span class="path">/api/v1/payments/{payment_id}</span>
+          </div>
+<pre><code>Response (200 OK):
+{
+  "id": "pay_9x8y7z6w5v4u",
+  "status": "captured",
+  "amount": 4999,
+  "currency": "USD",
+  "payment_method": "credit_card",
+  "gateway": "stripe",
+  "refunded_amount": 0,
+  "events": [
+    {"type": "payment.created",    "timestamp": "2024-01-15T10:30:00.000Z"},
+    {"type": "payment.authorized", "timestamp": "2024-01-15T10:30:00.150Z"},
+    {"type": "payment.captured",   "timestamp": "2024-01-15T10:30:00.320Z"}
+  ],
+  "created_at": "2024-01-15T10:30:00Z"
+}</code></pre>
+
+          <h3>Process Refund</h3>
+          <div class="api-endpoint">
+            <span class="method post">POST</span>
+            <span class="path">/api/v1/payments/{payment_id}/refund</span>
+          </div>
+<pre><code>Headers:
+  Idempotency-Key: "refund-a1b2c3d4"   ← Refunds are also idempotent
+
+Request Body:
+{
+  "amount": 2000,                    // Partial refund: $20.00 of $49.99
+  "reason": "customer_request"       // customer_request | duplicate | fraudulent
+}
+
+Response (201 Created):
+{
+  "id": "ref_abc123def456",
+  "payment_id": "pay_9x8y7z6w5v4u",
+  "amount": 2000,
+  "currency": "USD",
+  "status": "pending",               // pending → succeeded → or failed
+  "reason": "customer_request",
+  "created_at": "2024-01-16T14:00:00Z"
+}</code></pre>
+
+          <h3>Get Payment Receipt</h3>
+          <div class="api-endpoint">
+            <span class="method get">GET</span>
+            <span class="path">/api/v1/payments/{payment_id}/receipt</span>
+          </div>
+<pre><code>Response (200 OK):
+{
+  "receipt_id": "rcpt_xyz789",
+  "payment_id": "pay_9x8y7z6w5v4u",
+  "amount": 4999,
+  "currency": "USD",
+  "merchant_name": "Acme Store",
+  "payment_method_last4": "4242",
+  "status": "paid",
+  "receipt_url": "https://pay.example.com/receipts/rcpt_xyz789",
+  "created_at": "2024-01-15T10:30:00Z"
+}</code></pre>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> Notice that amounts are in the <strong>smallest currency unit</strong> (cents, not dollars). This avoids floating-point precision issues. $49.99 is stored as 4999 (integer). This is how Stripe, PayPal, and every serious payment system handles money. Never use floating-point for currency &mdash; 0.1 + 0.2 = 0.30000000000000004 in IEEE 754 floating point. Also note: the card token (<code>tok_visa_4242</code>) is provided instead of raw card numbers. The client collects card details via a gateway-hosted form (Stripe Elements) and receives a token. Our server never sees or stores raw card numbers &mdash; this is essential for PCI DSS compliance.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- DATA MODEL -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="data-model"></span>
+        <section class="section">
+          <h2>4. Data Model</h2>
+
+          <h3>Core Tables</h3>
+          <div class="diagram-box">
+<pre>
+    PAYMENTS TABLE
+    &equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;
+
+    ┌──────────────────────────────────────────────────────────┐
+    │  payments                                                │
+    ├──────────────────┬───────────────────────────────────────┤
+    │  id              │  UUID (PK)  "pay_9x8y7z6w5v4u"       │
+    │  idempotency_key │  VARCHAR UNIQUE  ← prevents duplicates│
+    │  merchant_id     │  UUID (FK)                            │
+    │  amount          │  BIGINT  (in smallest currency unit)  │
+    │  currency        │  CHAR(3)  ISO 4217 (USD, EUR, INR)    │
+    │  status          │  ENUM: created, processing,           │
+    │                  │    authorized, captured, settled,      │
+    │                  │    failed, cancelled                   │
+    │  payment_method  │  ENUM: credit_card, debit_card,       │
+    │                  │    upi, wallet                         │
+    │  payment_token   │  VARCHAR  (tokenized card/method)     │
+    │  gateway         │  ENUM: stripe, paypal, adyen          │
+    │  gateway_txn_id  │  VARCHAR  (gateway's transaction ID)  │
+    │  gateway_response│  JSONB  (raw gateway response)        │
+    │  description     │  TEXT                                  │
+    │  metadata        │  JSONB  (order_id, custom fields)     │
+    │  refunded_amount │  BIGINT  (total refunded so far)      │
+    │  created_at      │  TIMESTAMP                            │
+    │  updated_at      │  TIMESTAMP                            │
+    └──────────────────┴───────────────────────────────────────┘
+
+    Indexes:
+      UNIQUE (idempotency_key)  ← enforces exactly-once
+      INDEX  (merchant_id, created_at)
+      INDEX  (status)
+      INDEX  (gateway_txn_id)
+</pre>
+          </div>
+
+          <div class="diagram-box">
+<pre>
+    LEDGER ENTRIES TABLE (Double-Entry Bookkeeping)
+    &equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;
+
+    Every payment creates EXACTLY TWO ledger entries:
+    one DEBIT and one CREDIT. This is the foundation of
+    financial accounting and enables discrepancy detection.
+
+    ┌──────────────────────────────────────────────────────────┐
+    │  ledger_entries                                          │
+    ├──────────────────┬───────────────────────────────────────┤
+    │  id              │  UUID (PK)                            │
+    │  payment_id      │  UUID (FK &rarr; payments)                │
+    │  account_id      │  UUID  (buyer or seller account)      │
+    │  entry_type      │  ENUM: debit, credit                  │
+    │  amount          │  BIGINT  (always positive)            │
+    │  currency        │  CHAR(3)                              │
+    │  balance_after   │  BIGINT  (account balance after entry)│
+    │  created_at      │  TIMESTAMP                            │
+    └──────────────────┴───────────────────────────────────────┘
+
+    INVARIANT: For every payment_id,
+      SUM(debit amounts) = SUM(credit amounts)
+
+    Example for a $49.99 payment:
+    ┌────────┬──────────┬────────┬────────┐
+    │ Entry  │ Account  │ Type   │ Amount │
+    ├────────┼──────────┼────────┼────────┤
+    │ LE-001 │ Buyer    │ DEBIT  │ 4999   │
+    │ LE-002 │ Seller   │ CREDIT │ 4999   │
+    └────────┴──────────┴────────┴────────┘
+
+    If SUM(debits) &ne; SUM(credits), something is wrong.
+    This is how you detect bugs, fraud, and system errors.
+</pre>
+          </div>
+
+          <div class="diagram-box">
+<pre>
+    REFUNDS TABLE
+    &equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;
+
+    ┌──────────────────────────────────────────────────────────┐
+    │  refunds                                                 │
+    ├──────────────────┬───────────────────────────────────────┤
+    │  id              │  UUID (PK)  "ref_abc123def456"        │
+    │  payment_id      │  UUID (FK &rarr; payments)                │
+    │  idempotency_key │  VARCHAR UNIQUE                       │
+    │  amount          │  BIGINT  (partial or full)            │
+    │  currency        │  CHAR(3)                              │
+    │  status          │  ENUM: pending, succeeded, failed     │
+    │  reason          │  ENUM: customer_request, duplicate,   │
+    │                  │    fraudulent                          │
+    │  gateway_refund_id│ VARCHAR                              │
+    │  created_at      │  TIMESTAMP                            │
+    └──────────────────┴───────────────────────────────────────┘
+
+    Constraint: SUM(refunds.amount) for a payment_id
+                &le; payments.amount  (can't refund more than paid)
+
+
+    PAYMENT EVENTS TABLE (Event Sourcing)
+    &equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;
+
+    ┌──────────────────────────────────────────────────────────┐
+    │  payment_events                                          │
+    ├──────────────────┬───────────────────────────────────────┤
+    │  id              │  UUID (PK)                            │
+    │  payment_id      │  UUID (FK &rarr; payments)                │
+    │  event_type      │  VARCHAR  (payment.created,           │
+    │                  │    payment.authorized,                 │
+    │                  │    payment.captured,                   │
+    │                  │    payment.failed,                     │
+    │                  │    refund.initiated,                   │
+    │                  │    refund.succeeded)                   │
+    │  event_data      │  JSONB  (full state snapshot)         │
+    │  created_at      │  TIMESTAMP                            │
+    └──────────────────┴───────────────────────────────────────┘
+
+    This table is APPEND-ONLY. Events are never updated or
+    deleted. You can reconstruct the complete state of any
+    payment by replaying its events in order.
+
+    This is the audit trail that financial regulators require.
+</pre>
+          </div>
+
+          <div class="info-box note">
+            <strong>Key Insight:</strong> The <code>idempotency_key</code> column with a UNIQUE constraint is the database-level enforcement of exactly-once processing. When a duplicate request arrives, the INSERT fails with a unique constraint violation, and the server returns the existing payment record instead of creating a new one. This works even if the application server crashes and restarts &mdash; the constraint is enforced by the database, not application memory. The <code>payment_events</code> table provides event sourcing: the payments table holds the current state, but the events table holds the complete history. You can always derive the current state from the events, but not vice versa.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- HIGH-LEVEL DESIGN -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="high-level-design"></span>
+        <section class="section">
+          <h2>5. High-Level Design</h2>
+
+          <p>The architecture follows a layered pattern: <strong>Client &rarr; Payment Service &rarr; Payment Gateway &rarr; Bank/Card Network</strong>. Supporting services handle ledger bookkeeping, reconciliation, and notifications. The Payment Service is the orchestrator that coordinates the entire payment flow.</p>
+
+          <h3>System Architecture</h3>
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    subgraph ClientLayer[Client Layer]
+        WebMobile[Web/Mobile Client]
+        MerchantSrv[Merchant Server]
+    end
+
+    subgraph PaymentSvc[Payment Service]
+        PS[Payment Service]
+    end
+
+    subgraph Gateways[External Gateways]
+        StripeAPI[Stripe API]
+        PayPalAPI[PayPal API]
+        AdyenAPI[Adyen API Fallback]
+    end
+
+    subgraph BankNet[Bank / Card Network]
+        CardNetwork[Visa / MC / Amex Network]
+        Banks[Issuing Bank / Acquiring Bank]
+    end
+
+    subgraph Supporting[Supporting Services]
+        LedgerSvc[Ledger Service]
+        ReconSvc[Reconciliation Service]
+        NotifSvc[Notification Service]
+    end
+
+    subgraph Infra[Infrastructure]
+        DB[(PostgreSQL)]
+        MQ[(Kafka)]
+    end
+
+    WebMobile --> PS
+    MerchantSrv --> PS
+    PS --> StripeAPI
+    PS --> PayPalAPI
+    PS --> AdyenAPI
+    StripeAPI --> CardNetwork
+    PayPalAPI --> CardNetwork
+    CardNetwork --> Banks
+
+    PS --> DB
+    PS --> MQ
+    MQ --> LedgerSvc
+    MQ --> ReconSvc
+    MQ --> NotifSvc
+    LedgerSvc --> DB
+          </div></div>
+
+          <h3>Payment Flow</h3>
+          <div class="flow-container">
+            <div class="flow-box">Client submits payment with idempotency key</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Payment Service checks idempotency &amp; validates</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">Gateway Router selects gateway</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Gateway authorizes &amp; captures</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">Ledger Service records debit + credit</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Notification Service confirms to user</div>
+          </div>
+
+          <h3>Key Components</h3>
+          <div class="comparison-grid">
+            <div class="comparison-card">
+              <h4>Payment Service (Orchestrator)</h4>
+<pre><code>The central coordinator for all payments.
+
+Responsibilities:
+&bull; Receive payment requests from clients
+&bull; Check idempotency key in DB
+&bull; Validate amount, currency, merchant
+&bull; Select gateway via Gateway Router
+&bull; Call gateway API (authorize/capture)
+&bull; Persist payment record in DB
+&bull; Publish payment events to Kafka
+&bull; Return response to client
+
+Stateless &mdash; can scale horizontally.
+All state is in the database.
+Multiple instances behind a load balancer.</code></pre>
+            </div>
+            <div class="comparison-card">
+              <h4>Ledger Service</h4>
+<pre><code>Maintains the financial truth of the system.
+
+Responsibilities:
+&bull; Create double-entry ledger records
+  for every payment and refund
+&bull; Debit buyer account, credit seller
+&bull; Track running balances per account
+&bull; Enforce invariant:
+  SUM(debits) = SUM(credits)
+&bull; Provide balance queries for merchants
+&bull; Support settlement calculations
+
+Consumes payment events from Kafka.
+Writes to ledger_entries table.
+Critical for financial correctness.</code></pre>
+            </div>
+          </div>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> Emphasize the separation between the Payment Service and the Ledger Service. The Payment Service handles the <em>mechanics</em> of processing a payment (talking to gateways). The Ledger Service handles the <em>accounting</em> (who owes what to whom). This separation is important because: (1) the ledger is the source of financial truth and must be independently auditable, (2) the ledger can be updated asynchronously after the payment succeeds, and (3) different teams (engineering vs. finance) own these services. At Stripe, these are separate systems with different consistency requirements.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- DEEP DIVE -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="deep-dive"></span>
+        <section class="section">
+          <h2>6. Deep Dive</h2>
+
+          <!-- 6a. Idempotency -->
+          <h3>6a. Idempotency &mdash; The Most Important Concept</h3>
+          <p>Idempotency ensures that performing the same operation multiple times produces the same result as performing it once. In a payment system, this means: <strong>if a client sends the same payment request twice (due to retry after timeout), the customer is charged exactly once.</strong> This is the single most critical design concept in any payment system.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+sequenceDiagram
+    participant C as Client
+    participant PS as Payment Service
+    participant GW as Gateway
+
+    Note over C,GW: Problem - Without Idempotency
+
+    C->>PS: POST /payments charge $49.99
+    PS->>GW: charge $49.99
+    GW-->>PS: success
+    PS--xC: TIMEOUT response lost
+
+    C->>PS: Retry POST /payments charge $49.99
+    PS->>GW: charge $49.99 AGAIN
+    GW-->>PS: success
+    PS-->>C: 201 Created
+    Note over C,GW: Customer charged $99.98 - DOUBLE CHARGE!
+
+    Note over C,GW: Solution - With Idempotency Key
+
+    C->>PS: POST /payments Idempotency-Key abc
+    PS->>PS: Check DB key abc exists NO
+    PS->>PS: Insert payment status processing
+    PS->>GW: charge $49.99
+    GW-->>PS: success
+    PS->>PS: Update status captured
+    PS--xC: TIMEOUT
+
+    C->>PS: Retry POST /payments Idempotency-Key abc
+    PS->>PS: Check DB key abc exists YES
+    PS-->>C: 200 OK cached response
+    Note over C,GW: Customer charged exactly $49.99 - Correct!
+          </div></div>
+
+          <div class="diagram-box">
+<pre>
+    IDEMPOTENCY IMPLEMENTATION DETAIL
+    &equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;
+
+    def process_payment(request):
+        idempotency_key = request.headers["Idempotency-Key"]
+
+        # Step 1: Check if this key already exists
+        existing = db.query(
+            "SELECT * FROM payments WHERE idempotency_key = %s",
+            idempotency_key
+        )
+
+        if existing:
+            # Duplicate request &mdash; return cached response
+            if existing.status == "processing":
+                # Original request still in progress
+                return 409 Conflict ("Payment in progress")
+            else:
+                # Original request completed
+                return 200 OK (existing)   # ← cached response
+
+        # Step 2: Insert new payment (atomically with key)
+        try:
+            payment = db.insert("""
+                INSERT INTO payments (id, idempotency_key, amount,
+                    currency, status, ...)
+                VALUES (%s, %s, %s, %s, 'processing', ...)
+            """, new_uuid(), idempotency_key, amount, currency)
+        except UniqueConstraintViolation:
+            # Race condition: another thread inserted first
+            # Retry Step 1
+            return process_payment(request)
+
+        # Step 3: Call payment gateway
+        try:
+            gateway_response = gateway.charge(amount, currency, token)
+            db.update(payment.id, status="captured",
+                      gateway_response=gateway_response)
+            return 201 Created (payment)
+        except GatewayError:
+            db.update(payment.id, status="failed")
+            return 500 Error
+
+    KEY DESIGN DECISIONS:
+    ────────────────────────────────────────────────────────
+
+    1. The idempotency key is stored in the DB with a UNIQUE
+       constraint &mdash; not in application memory or Redis.
+       This survives server restarts and works across
+       multiple application instances.
+
+    2. The payment is inserted with status "processing"
+       BEFORE calling the gateway. This ensures the key is
+       claimed even if the server crashes after the gateway
+       call but before the DB update.
+
+    3. The UNIQUE constraint handles race conditions: if two
+       threads try to insert the same key simultaneously,
+       one will fail with a constraint violation and retry.
+
+    4. Idempotency keys should expire after 24&ndash;48 hours.
+       This prevents the table from growing indefinitely
+       and allows clients to reuse keys after expiry.
+</pre>
+          </div>
+
+          <div class="info-box important">
+            <strong>This is the #1 topic interviewers test at Stripe, PayPal, and Square.</strong> If you can explain idempotency clearly &mdash; the problem it solves, how the key works, where it&rsquo;s stored, how race conditions are handled, and what happens when the server crashes mid-payment &mdash; you&rsquo;ve demonstrated deep understanding of payment systems. Practice drawing the sequence diagram from memory.
+          </div>
+
+          <!-- 6b. Payment Flow -->
+          <h3>6b. Payment Flow &mdash; Authorize vs. Capture</h3>
+          <p>Payments typically follow a two-phase approach: <strong>authorization</strong> (verify the customer has funds and place a hold) and <strong>capture</strong> (actually transfer the funds). Some merchants use a combined auth+capture in a single step.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+stateDiagram-v2
+    [*] --> CREATED: Payment initiated
+    CREATED --> PROCESSING: Validate request
+    PROCESSING --> AUTHORIZED: Gateway approves
+    PROCESSING --> FAILED: Gateway rejects
+    AUTHORIZED --> CAPTURED: Capture call
+    CREATED --> CANCELLED: User cancels
+    CAPTURED --> SETTLED: Settlement 1-3 days
+    SETTLED --> [*]
+    FAILED --> [*]
+    CANCELLED --> [*]
+          </div></div>
+
+          <!-- 6c. Double-Entry Ledger -->
+          <h3>6c. Double-Entry Ledger &mdash; The Financial Truth</h3>
+          <p>Every payment system needs a ledger that follows <strong>double-entry bookkeeping</strong>: every transaction creates exactly two entries &mdash; a debit from one account and a credit to another. The sum of all debits must always equal the sum of all credits. This 700-year-old accounting principle is how you detect errors, fraud, and system bugs.</p>
+
+          <div class="diagram-box">
+<pre>
+    DOUBLE-ENTRY BOOKKEEPING
+    &equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;
+
+    RULE: Every transaction creates TWO entries.
+          Money doesn't appear or disappear &mdash; it moves.
+
+    PAYMENT: Customer pays $49.99 to Merchant
+    ────────────────────────────────────────────────────────
+
+    ┌─────────────────────────────────────────────────────┐
+    │  Ledger Entry 1 (DEBIT):                            │
+    │    Account: Customer's account                      │
+    │    Type: DEBIT                                      │
+    │    Amount: $49.99                                   │
+    │    Description: "Payment for Order #12345"          │
+    ├─────────────────────────────────────────────────────┤
+    │  Ledger Entry 2 (CREDIT):                           │
+    │    Account: Merchant's account                      │
+    │    Type: CREDIT                                     │
+    │    Amount: $49.99                                   │
+    │    Description: "Payment for Order #12345"          │
+    └─────────────────────────────────────────────────────┘
+
+    Debit total:  $49.99
+    Credit total: $49.99
+    Difference:   $0.00  ✓ Balanced!
+
+
+    REFUND: Merchant refunds $20.00 to Customer
+    ────────────────────────────────────────────────────────
+
+    ┌─────────────────────────────────────────────────────┐
+    │  Ledger Entry 3 (DEBIT):                            │
+    │    Account: Merchant's account                      │
+    │    Type: DEBIT                                      │
+    │    Amount: $20.00                                   │
+    │    Description: "Refund for Order #12345"           │
+    ├─────────────────────────────────────────────────────┤
+    │  Ledger Entry 4 (CREDIT):                           │
+    │    Account: Customer's account                      │
+    │    Type: CREDIT                                     │
+    │    Amount: $20.00                                   │
+    │    Description: "Refund for Order #12345"           │
+    └─────────────────────────────────────────────────────┘
+
+    Running totals:
+      Total debits:  $49.99 + $20.00 = $69.99
+      Total credits: $49.99 + $20.00 = $69.99
+      Difference: $0.00  ✓ Still balanced!
+
+    Net positions:
+      Customer: -$49.99 (debit) + $20.00 (credit) = -$29.99
+      Merchant: +$49.99 (credit) - $20.00 (debit) = +$29.99
+
+
+    WITH PLATFORM FEE (e.g., marketplace takes 10%):
+    ────────────────────────────────────────────────────────
+
+    Customer pays $49.99 for a product on a marketplace.
+    Platform takes 10% fee ($5.00). Merchant receives $44.99.
+
+    ┌────────┬──────────────────┬────────┬────────┐
+    │ Entry  │ Account          │ Type   │ Amount │
+    ├────────┼──────────────────┼────────┼────────┤
+    │ LE-1   │ Customer         │ DEBIT  │ $49.99 │
+    │ LE-2   │ Merchant         │ CREDIT │ $44.99 │
+    │ LE-3   │ Platform Revenue │ CREDIT │ $5.00  │
+    └────────┴──────────────────┴────────┴────────┘
+
+    Debits:  $49.99
+    Credits: $44.99 + $5.00 = $49.99  ✓ Balanced!
+
+    If debits &ne; credits at ANY point, you have a bug.
+    Run this check daily. It's your financial safety net.
+</pre>
+          </div>
+
+          <!-- 6d. Reconciliation -->
+          <h3>6d. Reconciliation &mdash; Trust but Verify</h3>
+          <p>Reconciliation is the process of comparing your internal ledger with the payment gateway&rsquo;s settlement reports to ensure they match. Discrepancies indicate bugs, failed callbacks, or fraud. This runs as a daily batch job.</p>
+
+          <div class="diagram-box">
+<pre>
+    RECONCILIATION PROCESS
+    &equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;
+
+    DAILY RECONCILIATION FLOW:
+    ────────────────────────────────────────────────────────
+
+    1. Download settlement report from gateway
+       (Stripe sends daily CSV/API with all settled transactions)
+
+    2. For each transaction in the settlement report:
+       a. Look up the corresponding payment in our DB
+          (match by gateway_txn_id)
+       b. Compare amounts, currencies, statuses
+
+    3. Classify each transaction:
+
+    ┌──────────────────┬───────────────────────────────────┐
+    │  Classification  │  Description                      │
+    ├──────────────────┼───────────────────────────────────┤
+    │  MATCHED         │  Our record matches gateway's     │
+    │                  │  record. Amount, currency, status  │
+    │                  │  all agree. No action needed.      │
+    ├──────────────────┼───────────────────────────────────┤
+    │  AMOUNT MISMATCH │  We show $49.99, gateway shows    │
+    │                  │  $48.99. Could be currency         │
+    │                  │  conversion or a bug. Flag for     │
+    │                  │  manual review.                    │
+    ├──────────────────┼───────────────────────────────────┤
+    │  MISSING IN      │  Gateway settled a payment we     │
+    │  OUR SYSTEM      │  don't have. Possibly a missed    │
+    │                  │  webhook callback. Create the      │
+    │                  │  record and investigate.            │
+    ├──────────────────┼───────────────────────────────────┤
+    │  MISSING IN      │  We show a captured payment, but  │
+    │  GATEWAY         │  gateway didn't settle it. The    │
+    │                  │  capture may have failed silently. │
+    │                  │  Investigate and potentially       │
+    │                  │  refund the customer.              │
+    ├──────────────────┼───────────────────────────────────┤
+    │  STATUS MISMATCH │  We show "captured", gateway      │
+    │                  │  shows "refunded". A refund was    │
+    │                  │  processed outside our system.     │
+    │                  │  Update our records.               │
+    └──────────────────┴───────────────────────────────────┘
+
+    4. Generate reconciliation report:
+       &bull; Total transactions: 1,000,000
+       &bull; Matched: 999,950 (99.995%)
+       &bull; Mismatches: 50 (flagged for review)
+       &bull; Total discrepancy amount: $1,234.56
+
+    5. Alert finance team if discrepancy exceeds threshold.
+
+    At scale, 99.99% match rate is good. The remaining
+    0.01% (100 transactions/day at 1M/day) are investigated
+    manually or auto-resolved by the reconciliation service.
+</pre>
+          </div>
+
+          <!-- 6e. Handling Failures -->
+          <h3>6e. Handling Failures &mdash; What Can Go Wrong</h3>
+          <p>Payment systems must handle a wide variety of failure scenarios gracefully. The key principle is: <strong>when in doubt, don&rsquo;t charge the customer.</strong> It&rsquo;s better to fail a payment and ask the customer to retry than to charge them and not be able to confirm it.</p>
+
+          <div class="diagram-box">
+<pre>
+    FAILURE SCENARIOS AND HANDLING
+    &equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;
+
+    SCENARIO 1: Gateway timeout
+    ────────────────────────────────────────────────────────
+
+    Payment Service ── charge $49.99 ──▶ Gateway
+                                           │
+                   ✗ TIMEOUT (no response) │
+                   ◀── ✗ ─────────────────┘
+
+    Did the charge go through? WE DON'T KNOW.
+
+    Solution:
+    1. Mark payment as "unknown" in our DB
+    2. Query gateway for transaction status (GET /charges/{id})
+    3. If gateway confirms success &rarr; mark as captured
+    4. If gateway confirms failure &rarr; mark as failed
+    5. If gateway also doesn't know &rarr; wait and retry query
+    6. NEVER retry the charge &mdash; use the idempotency key
+       to query, not to re-submit
+
+    SCENARIO 2: Our server crashes after gateway success
+    ────────────────────────────────────────────────────────
+
+    Payment Service ── charge $49.99 ──▶ Gateway
+    Payment Service ◀── success ────────┘
+    Payment Service ── update DB ──▶ DB
+                    ✗ SERVER CRASHES ✗
+
+    The customer was charged, but our DB doesn't know.
+
+    Solution:
+    1. Payment was inserted with status "processing" BEFORE
+       the gateway call (Step 2 in idempotency flow)
+    2. A background job scans for "processing" payments
+       older than 5 minutes
+    3. For each, query the gateway for actual status
+    4. Update our DB to match gateway's truth
+    5. This is called "payment recovery" or "stuck payment
+       resolution"
+
+    SCENARIO 3: Gateway is completely down
+    ────────────────────────────────────────────────────────
+
+    Payment Service ── charge ──▶ Stripe
+                    ✗ CONNECTION REFUSED ✗
+
+    Solution:
+    1. Circuit breaker detects Stripe is down
+       (after N consecutive failures in M seconds)
+    2. Circuit breaker OPENS &mdash; stop sending to Stripe
+    3. Gateway Router fails over to secondary gateway (Adyen)
+    4. Process payment through Adyen instead
+    5. Circuit breaker periodically tests Stripe (half-open)
+    6. When Stripe recovers, circuit breaker CLOSES
+    7. Resume sending to Stripe
+
+    Circuit Breaker States:
+    ┌────────┐  N failures  ┌────────┐  test    ┌───────────┐
+    │ CLOSED │─────────────▶│  OPEN  │─────────▶│ HALF-OPEN │
+    │(normal)│              │(reject)│          │ (test 1)  │
+    └────────┘              └────────┘          └───────────┘
+         ▲                                          │
+         │              success                     │
+         └──────────────────────────────────────────┘
+              failure &rarr; back to OPEN
+
+    SCENARIO 4: Database is down
+    ────────────────────────────────────────────────────────
+
+    Solution:
+    1. Cannot check idempotency key &rarr; REJECT the payment
+    2. Return 503 Service Unavailable to client
+    3. Client retries with exponential backoff
+    4. NEVER process a payment without DB access &mdash;
+       you can't guarantee idempotency without the DB
+</pre>
+          </div>
+
+          <!-- 6f. Exactly-Once Processing -->
+          <h3>6f. Exactly-Once Processing &mdash; Transactional Outbox Pattern</h3>
+          <p>Ensuring exactly-once processing requires more than just idempotency keys. When the Payment Service needs to both update the database AND publish an event to Kafka, these two operations must be atomic. The <strong>transactional outbox pattern</strong> solves this.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    subgraph SingleTXN[Single Database Transaction]
+        UPD[UPDATE payments SET status captured]
+        INS[INSERT INTO outbox_events published false]
+        UPD --> INS
+    end
+
+    subgraph OutboxPublisher[Outbox Publisher Process]
+        POLL[SELECT unpublished events LIMIT 100]
+        PUB[Publish to Kafka topic]
+        MARK[UPDATE outbox_events SET published true]
+        POLL --> PUB --> MARK
+    end
+
+    subgraph Downstream[Downstream Consumers]
+        Ledger[Ledger Service]
+        Notif[Notification Service]
+        Recon[Reconciliation Service]
+    end
+
+    SingleTXN --> POLL
+    PUB --> Ledger
+    PUB --> Notif
+    PUB --> Recon
+    MARK -.retry on failure.-> POLL
+          </div></div>
+
+          <div class="info-box note">
+            <strong>Key Insight:</strong> The transactional outbox pattern converts a distributed transaction (DB + Kafka) into a local transaction (DB only) plus an eventually-consistent relay. This is a fundamental pattern in microservices architecture, not just payment systems. The trade-off is slightly increased latency (events are published with a small delay) and the requirement that downstream consumers be idempotent. An alternative is Change Data Capture (CDC) using tools like Debezium, which reads the database&rsquo;s transaction log and publishes changes to Kafka automatically &mdash; no outbox table needed.
+          </div>
+
+          <!-- 6g. Security -->
+          <h3>6g. Security &mdash; PCI DSS Compliance</h3>
+          <p>Payment systems handle sensitive financial data and must comply with the Payment Card Industry Data Security Standard (PCI DSS). The core principle is: <strong>minimize the scope of sensitive data in your system.</strong></p>
+
+          <div class="diagram-box">
+<pre>
+    PCI DSS COMPLIANCE STRATEGY
+    &equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;
+
+    TOKENIZATION &mdash; Never Touch Raw Card Numbers
+    ────────────────────────────────────────────────────────
+
+    Without tokenization (BAD &mdash; PCI Level 1 required):
+
+    Browser ── card: 4242-4242-4242-4242 ──▶ Your Server
+    Your Server ── card: 4242-4242-4242-4242 ──▶ Gateway
+
+    Your server sees and transmits raw card numbers.
+    You must comply with ALL 300+ PCI DSS requirements.
+    Annual audit costs $50K&ndash;$500K. One breach = game over.
+
+
+    With tokenization (GOOD &mdash; PCI SAQ-A):
+
+    Browser ── card: 4242-4242-4242-4242 ──▶ Stripe.js
+                                              (hosted by Stripe)
+    Browser ◀── token: tok_visa_4242 ──────── Stripe.js
+
+    Browser ── token: tok_visa_4242 ──▶ Your Server
+    Your Server ── token: tok_visa_4242 ──▶ Stripe API
+
+    Your server NEVER sees the raw card number.
+    Stripe handles PCI compliance for card data.
+    You only need SAQ-A (simplest PCI questionnaire).
+
+
+    WHAT YOU MUST STILL DO:
+    ────────────────────────────────────────────────────────
+
+    &bull; HTTPS everywhere (TLS 1.2+ for all API communication)
+    &bull; Encrypt sensitive data at rest (AES-256)
+      &mdash; gateway_response may contain partial card info
+      &mdash; customer PII (email, address)
+    &bull; Access controls: least privilege, role-based access
+    &bull; Audit logging: who accessed what payment data, when
+    &bull; Network segmentation: payment services in isolated VPC
+    &bull; Regular security scans and penetration testing
+    &bull; Key rotation for encryption keys (every 90 days)
+    &bull; Never log sensitive data (card tokens, amounts in
+      plain text in application logs)
+
+
+    DATA CLASSIFICATION:
+    ────────────────────────────────────────────────────────
+
+    ┌──────────────────┬───────────────┬──────────────────┐
+    │  Data            │  Sensitivity  │  Storage Rule    │
+    ├──────────────────┼───────────────┼──────────────────┤
+    │  Raw card number │  PROHIBITED   │  Never store     │
+    │  CVV / CVC       │  PROHIBITED   │  Never store     │
+    │  Card token      │  High         │  Encrypted, DB   │
+    │  Last 4 digits   │  Medium       │  OK for display  │
+    │  Transaction amt │  Medium       │  Encrypted at    │
+    │                  │               │  rest             │
+    │  Payment status  │  Low          │  Standard DB     │
+    │  Merchant ID     │  Low          │  Standard DB     │
+    └──────────────────┴───────────────┴──────────────────┘
+</pre>
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- TRADE-OFFS -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="tradeoffs"></span>
+        <section class="section">
+          <h2>7. Trade-offs</h2>
+
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Decision</th>
+                  <th>Option A</th>
+                  <th>Option B</th>
+                  <th>Recommendation</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>Synchronous vs. Async Payment Processing</strong></td>
+                  <td><strong>Synchronous:</strong> Client waits for the gateway response. Simple flow, immediate feedback. But the client is blocked for 200&ndash;500ms. If the gateway is slow, the client times out and retries (risking double charges without idempotency).</td>
+                  <td><strong>Asynchronous:</strong> Return 202 Accepted immediately, process payment in background, notify via webhook. Better UX for slow gateways. But more complex: client must poll or listen for webhooks, harder to show instant confirmation.</td>
+                  <td>Use <strong>synchronous</strong> for standard card payments (&lt;500ms). Use <strong>asynchronous</strong> for bank transfers, UPI, and methods that inherently take longer. Most users expect instant confirmation for card payments &mdash; async adds unnecessary complexity for fast gateways.</td>
+                </tr>
+                <tr>
+                  <td><strong>Single vs. Multiple Payment Gateways</strong></td>
+                  <td><strong>Single gateway:</strong> Simpler integration, one contract, one dashboard. But single point of failure &mdash; if Stripe goes down, all payments fail. No cost optimization across gateways.</td>
+                  <td><strong>Multiple gateways:</strong> Failover capability, cost optimization (route to cheapest gateway per region/method). But more complex: must abstract gateway APIs, handle different response formats, reconcile across multiple sources.</td>
+                  <td>Start with a <strong>single gateway</strong> and add a second when you reach scale where downtime cost exceeds integration cost. Abstract the gateway interface from day one so adding a second gateway is a configuration change, not a rewrite. Most companies add a second gateway at ~$10M+ GMV/month.</td>
+                </tr>
+                <tr>
+                  <td><strong>Event Sourcing vs. CRUD for Payment State</strong></td>
+                  <td><strong>CRUD:</strong> Simple &mdash; update the payment row&rsquo;s status field directly. Easy to query current state. But loses history: you can&rsquo;t tell when a payment transitioned from authorized to captured, or if it was ever in a failed state.</td>
+                  <td><strong>Event sourcing:</strong> Append-only event log. Current state derived from events. Complete audit trail. But more complex: must replay events to get current state, eventual consistency between event store and read models.</td>
+                  <td>Use a <strong>hybrid approach</strong>: CRUD for the payments table (fast reads of current state) PLUS an append-only payment_events table (audit trail). This gives you the simplicity of CRUD for queries and the auditability of event sourcing for compliance. This is what Stripe does internally.</td>
+                </tr>
+                <tr>
+                  <td><strong>Strong vs. Eventual Consistency for Ledger</strong></td>
+                  <td><strong>Strong consistency:</strong> Ledger entries created in the same transaction as the payment update. Ledger is always in sync. But adds latency to the payment path and creates tight coupling between payment and ledger services.</td>
+                  <td><strong>Eventual consistency:</strong> Ledger entries created asynchronously via events. Payment path is faster. But there&rsquo;s a window where the ledger is behind &mdash; balance queries may be stale. Reconciliation catches discrepancies.</td>
+                  <td>Use <strong>eventual consistency</strong> for the ledger. The payment response to the customer should not wait for ledger entries to be created. The ledger is an internal accounting system &mdash; a few seconds of delay is acceptable. Use the transactional outbox pattern to guarantee the event is eventually processed. Run reconciliation daily to catch any gaps.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> When discussing trade-offs, connect them to business impact. For example: &ldquo;We chose synchronous processing for card payments because checkout conversion drops 7% for every additional second of latency. An async flow that shows &lsquo;payment pending&rsquo; instead of &lsquo;payment confirmed&rsquo; would hurt conversion rates. However, for bank transfers in India (UPI), the flow is inherently async &mdash; the user must approve in their banking app &mdash; so async is the natural fit there.&rdquo; This shows you think about system design in the context of business outcomes, not just technical elegance.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- REVISION CHECKLIST -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="revision"></span>
+        <section class="section">
+          <h2>8. Revision Checklist</h2>
+          <p>Use this checklist to verify you can recall the key concepts before your interview.</p>
+
+          <div class="checklist">
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Idempotency (THE #1 concept):</strong> Client sends Idempotency-Key header (UUID) with every payment request. Server stores the key in the DB with a UNIQUE constraint. On duplicate request, return cached response instead of processing again. Payment inserted with status &ldquo;processing&rdquo; BEFORE calling the gateway. This prevents double charging even if the server crashes mid-payment.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Architecture overview:</strong> Client &rarr; Payment Service &rarr; Gateway Router &rarr; Payment Gateway (Stripe/PayPal) &rarr; Card Network &rarr; Bank. Supporting services: Ledger Service (double-entry bookkeeping), Reconciliation Service (daily verification), Notification Service (confirmations). PostgreSQL for ACID transactions, Kafka for async event processing.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Scale context:</strong> 1M transactions/day = ~12 TPS avg, 120 TPS peak. This is NOT a scale problem &mdash; it&rsquo;s a correctness problem. ~500 MB/day storage. $50M/day GMV. Focus on exactly-once processing, not horizontal scaling.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Payment flow &mdash; authorize vs. capture:</strong> Two-phase: authorize (place hold on funds) then capture (transfer funds). Auth+capture in one step for digital goods. Auth-only for e-commerce (capture at shipment). Payment states: created &rarr; processing &rarr; authorized &rarr; captured &rarr; settled (or failed/cancelled).</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Double-entry ledger:</strong> Every payment creates TWO ledger entries: debit from buyer, credit to seller. SUM(debits) must ALWAYS equal SUM(credits). If they don&rsquo;t, something is wrong. For marketplace with fees: 1 debit (buyer) + 2 credits (seller + platform). This is the financial safety net.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Reconciliation:</strong> Daily batch job compares internal ledger with gateway settlement reports. Classify each transaction: matched, amount mismatch, missing in our system, missing in gateway. Target 99.99% match rate. Alert finance team on discrepancies above threshold.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Failure handling:</strong> Gateway timeout &rarr; query gateway for status, never re-charge. Server crash after gateway success &rarr; background job resolves &ldquo;stuck&rdquo; payments. Gateway down &rarr; circuit breaker + failover to secondary gateway. DB down &rarr; reject payment (can&rsquo;t guarantee idempotency without DB).</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Exactly-once processing:</strong> Idempotency key (prevents duplicate charges) + transactional outbox pattern (ensures DB update and event publish are atomic). Outbox publisher polls DB and publishes to Kafka. Downstream consumers must be idempotent. Alternative: CDC with Debezium.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>PCI DSS &amp; security:</strong> Never store raw card numbers or CVV. Use tokenization (Stripe.js collects card, returns token). HTTPS everywhere. Encrypt at rest (AES-256). Audit logging. Network segmentation. Key rotation every 90 days. Tokenization reduces PCI scope from Level 1 (300+ requirements) to SAQ-A (simplest).</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>API design details:</strong> Amounts in smallest currency unit (cents, not dollars) to avoid floating-point errors. Idempotency-Key in request header. Card tokens instead of raw numbers. Refunds are also idempotent. Status endpoint returns full event history for the payment.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Data model:</strong> Four core tables: payments (with idempotency_key UNIQUE), ledger_entries (double-entry bookkeeping), refunds (with amount constraint &le; payment amount), payment_events (append-only audit trail / event sourcing).</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Trade-offs:</strong> Sync vs. async processing (sync for cards, async for bank transfers). Single vs. multiple gateways (start single, add second at scale). Event sourcing vs. CRUD (hybrid: CRUD for current state + event log for audit). Strong vs. eventual consistency for ledger (eventual &mdash; don&rsquo;t block payment path for bookkeeping).</span>
+            </label>
+          </div>
+        </section>
+
+        <!-- Bottom nav -->
+        <div class="problem-nav">
+          <a href="metrics-monitoring.html"><span class="nav-label">Previous</span><span class="nav-title">Metrics Monitoring</span></a>
+          <a href="../index.html" class="next"><span class="nav-label">Back to</span><span class="nav-title">All Problems</span></a>
+        </div>
+      </div>
+    </div>
+  </main>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script src="../js/app.js"></script>
+</body>
+</html>

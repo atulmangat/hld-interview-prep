@@ -1,0 +1,730 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Consistent Hashing — HLD Interview Prep</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+  <nav class="top-nav">
+    <div class="top-nav-inner">
+      <a href="../index.html" class="nav-logo">
+        <div class="nav-logo-icon">SD</div>
+        <span>HLD Interview Prep</span>
+      </a>
+      <div class="nav-actions">
+        <div class="nav-breadcrumb">
+          <a href="../index.html">Home</a>
+          <span class="separator">/</span>
+          <span class="current">Consistent Hashing</span>
+        </div>
+        <button class="theme-toggle" id="theme-toggle">&#x263E;</button>
+      </div>
+    </div>
+  </nav>
+  <div class="scroll-progress"></div>
+
+  <main class="main-content">
+    <div class="problem-page">
+      <!-- Sidebar TOC -->
+      <aside class="sidebar">
+        <div class="sidebar-title">On This Page</div>
+        <ul class="toc-list">
+          <li><a href="#the-problem">The Problem</a></li>
+          <li><a href="#basic-consistent-hashing">Basic Consistent Hashing</a></li>
+          <li><a href="#virtual-nodes">Virtual Nodes</a></li>
+          <li><a href="#hash-functions">Hash Functions</a></li>
+          <li><a href="#real-world-usage">Real-World Usage</a></li>
+          <li><a href="#implementation">Implementation Details</a></li>
+          <li><a href="#tradeoffs">Trade-offs</a></li>
+          <li><a href="#revision">Revision Checklist</a></li>
+        </ul>
+        <div class="progress-bar"><div class="progress-fill" style="width: 0%"></div></div>
+      </aside>
+
+      <div class="problem-content">
+        <!-- Header -->
+        <div class="problem-header">
+          <h1>Consistent Hashing</h1>
+          <p class="problem-subtitle">Understand consistent hashing &mdash; the foundational technique that enables distributed systems to add and remove nodes with minimal data movement, powering everything from distributed caches to NoSQL databases.</p>
+          <div class="problem-meta-bar">
+            <span class="meta-badge difficulty-medium">Medium</span>
+            <span class="meta-badge">Core Infrastructure</span>
+            <span class="meta-badge">Asked at: Amazon, Facebook, Netflix</span>
+          </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- THE PROBLEM -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="the-problem"></span>
+        <section class="section">
+          <h2>1. The Problem</h2>
+
+          <p>In distributed systems, we frequently need to distribute data (cache entries, database rows, files) across multiple servers. The naive approach is <strong>modular hashing</strong>: compute <code>hash(key) % N</code> where N is the number of servers. This works &mdash; until the number of servers changes.</p>
+
+          <h3>Why Naive Modular Hashing Fails</h3>
+          <p>Consider 4 servers (S0&ndash;S3) and 8 keys. Using <code>hash(key) % 4</code>:</p>
+
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Key</th>
+                  <th>hash(key)</th>
+                  <th>hash % 4 (4 servers)</th>
+                  <th>hash % 5 (5 servers)</th>
+                  <th>Remapped?</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>user_1</td>
+                  <td>14</td>
+                  <td>S2</td>
+                  <td>S4</td>
+                  <td><strong>Yes</strong></td>
+                </tr>
+                <tr>
+                  <td>user_2</td>
+                  <td>27</td>
+                  <td>S3</td>
+                  <td>S2</td>
+                  <td><strong>Yes</strong></td>
+                </tr>
+                <tr>
+                  <td>user_3</td>
+                  <td>8</td>
+                  <td>S0</td>
+                  <td>S3</td>
+                  <td><strong>Yes</strong></td>
+                </tr>
+                <tr>
+                  <td>user_4</td>
+                  <td>33</td>
+                  <td>S1</td>
+                  <td>S3</td>
+                  <td><strong>Yes</strong></td>
+                </tr>
+                <tr>
+                  <td>user_5</td>
+                  <td>20</td>
+                  <td>S0</td>
+                  <td>S0</td>
+                  <td>No</td>
+                </tr>
+                <tr>
+                  <td>user_6</td>
+                  <td>11</td>
+                  <td>S3</td>
+                  <td>S1</td>
+                  <td><strong>Yes</strong></td>
+                </tr>
+                <tr>
+                  <td>user_7</td>
+                  <td>5</td>
+                  <td>S1</td>
+                  <td>S0</td>
+                  <td><strong>Yes</strong></td>
+                </tr>
+                <tr>
+                  <td>user_8</td>
+                  <td>36</td>
+                  <td>S0</td>
+                  <td>S1</td>
+                  <td><strong>Yes</strong></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="info-box important">
+            <strong>The Core Problem:</strong> Adding just 1 server (4 &rarr; 5) remapped <strong>7 out of 8 keys (87.5%)</strong>. In a real system with millions of cached entries, this means nearly every cache lookup becomes a miss &mdash; causing a <strong>cache avalanche</strong> that can bring down the backend database.
+          </div>
+
+          <h3>The Impact at Scale</h3>
+          <ul class="content-list">
+            <li><strong>Cache avalanche:</strong> Nearly all cache entries become invalid simultaneously. Every request hits the database, potentially causing cascading failure.</li>
+            <li><strong>Data migration storms:</strong> In a distributed database, most data partitions need to be moved between nodes &mdash; saturating the network and degrading performance for hours.</li>
+            <li><strong>Downtime during scaling:</strong> Adding or removing a single server requires a coordinated, system-wide rebalancing operation rather than a localized adjustment.</li>
+          </ul>
+
+          <p>The fundamental issue: <code>hash % N</code> creates a dependency on <strong>N</strong>. When N changes, nearly every key maps to a different server. We need a scheme where changing N only affects a small fraction of keys &mdash; ideally <code>K/N</code> keys, where K is the total number of keys.</p>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> Always start by explaining <em>why</em> consistent hashing exists before diving into <em>how</em> it works. Demonstrating the failure of naive hashing with a concrete numeric example shows the interviewer you understand the motivation, not just the mechanism.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- BASIC CONSISTENT HASHING -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="basic-consistent-hashing"></span>
+        <section class="section">
+          <h2>2. Basic Consistent Hashing</h2>
+
+          <p>Consistent hashing, introduced by Karger et al. (1997), solves the remapping problem by using a <strong>hash ring</strong> instead of modular arithmetic. Both servers and keys are mapped onto the same circular hash space.</p>
+
+          <h3>The Hash Ring Concept</h3>
+          <ol>
+            <li><strong>Define the ring:</strong> The hash space is a circle from 0 to 2<sup>32</sup>&minus;1 (or any large range). The value wraps around: position 2<sup>32</sup> is the same as position 0.</li>
+            <li><strong>Place servers on the ring:</strong> Hash each server's identifier (e.g., IP address or hostname) to get its position on the ring. <code>position = hash(server_id)</code></li>
+            <li><strong>Place keys on the ring:</strong> Hash each key to get its position. <code>position = hash(key)</code></li>
+            <li><strong>Map keys to servers:</strong> For each key, walk <strong>clockwise</strong> around the ring until you hit the first server. That server owns the key.</li>
+          </ol>
+
+          <h3>Hash Ring Visualization</h3>
+          <div class="mermaid-container"><div class="mermaid">
+graph LR
+    S0["S0 pos 450"] -->|clockwise| S1["S1 pos ~2.15B"]
+    S1 -->|clockwise| S2["S2 pos ~3.2B"]
+    S2 -->|clockwise, wraps| S0
+
+    K1["Key K1"] -.->|walks CW| S0
+    K2["Key K2"] -.->|walks CW, wraps| S2
+    K3["Key K3"] -.->|walks CW| S2
+
+    subgraph HashRing["Hash Ring - 0 to 2^32"]
+        S0
+        S1
+        S2
+    end
+          </div></div>
+
+          <h3>Adding a Server</h3>
+          <p>When a new server S3 is added to the ring, it is placed at its hash position. Only the keys that fall between the <strong>new server</strong> and its <strong>predecessor</strong> (counter-clockwise neighbor) need to be remapped &mdash; they now belong to S3 instead of the server that was previously their clockwise neighbor.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    subgraph Before["Before Adding S3"]
+        B_S0["S0"] -->|clockwise| B_S1["S1"]
+        B_S1 -->|clockwise| B_S2["S2"]
+        B_S2 -->|clockwise - all keys here go to S0| B_S0
+    end
+
+    subgraph After["After Adding S3"]
+        A_S0["S0"] -->|clockwise| A_S1["S1"]
+        A_S1 -->|clockwise| A_S2["S2"]
+        A_S2 -->|keys in this arc go to S3| A_S3["S3 NEW"]
+        A_S3 -->|remaining keys still go to S0| A_S0
+    end
+
+    style A_S3 fill:#f9a825,stroke:#f57f17,color:#000
+          </div></div>
+
+          <h3>Key Remapping: The Math</h3>
+          <p>With <strong>K</strong> keys and <strong>N</strong> servers, adding or removing a server only remaps approximately:</p>
+<pre><code>Keys remapped ≈ K / N
+
+Example: 1,000,000 keys across 10 servers
+  Naive hash % N:        ~900,000 keys remapped (90%)
+  Consistent hashing:    ~100,000 keys remapped (10%)
+</code></pre>
+
+          <div class="info-box note">
+            <strong>Why K/N?</strong> Each server owns approximately 1/N of the ring. When a new server is added, it takes over a portion of the ring from its clockwise neighbor. On average, that portion is 1/N of the total ring &mdash; so approximately K/N keys move. This is the theoretical minimum for any scheme that maintains balance.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- VIRTUAL NODES -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="virtual-nodes"></span>
+        <section class="section">
+          <h2>3. Virtual Nodes (Vnodes)</h2>
+
+          <h3>The Problem with Basic Consistent Hashing</h3>
+          <p>With only a few physical servers on the ring, the distribution of keys is highly uneven. Servers are placed at arbitrary hash positions, creating arcs of vastly different sizes. Some servers end up owning a disproportionately large portion of the ring while others own very little.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    S0["S0 - owns ~10% of keys"] -->|small arc| S1["S1 - owns ~60% of keys"]
+    S1 -->|large arc| S2["S2 - owns ~30% of keys"]
+    S2 -->|medium arc, wraps to top| S0
+
+    Note["Std dev of load: 50%+ with 3 servers. One server handles 6x the load of another."]
+
+    style S1 fill:#e53935,stroke:#b71c1c,color:#fff
+    style S0 fill:#43a047,stroke:#2e7d32,color:#fff
+    style S2 fill:#fb8c00,stroke:#ef6c00,color:#fff
+    style Note fill:none,stroke:none,color:#888
+          </div></div>
+
+          <h3>The Solution: Virtual Nodes</h3>
+          <p>Instead of placing each physical server at a single point on the ring, map each physical server to <strong>multiple virtual nodes</strong> (typically 100&ndash;200 per server). Each virtual node is placed at a different position on the ring by hashing variants of the server identifier:</p>
+
+<pre><code>// Generate virtual nodes for server "S0"
+for i in 0..149:
+    position = hash("S0#" + i)
+    ring.add(position → S0)
+
+// Server S0 now has 150 points on the ring
+// Repeat for S1, S2, etc.</code></pre>
+
+          <h3>How Virtual Nodes Improve Balance</h3>
+          <div class="mermaid-container"><div class="mermaid">
+graph LR
+    subgraph Ring["Ring with 150 vnodes per server - 450 points total"]
+        V1["S0-v1"] --> V2["S2-v1"] --> V3["S1-v1"] --> V4["S0-v2"] --> V5["S2-v2"] --> V6["S1-v2"]
+        V6 --> V7["S1-v3"] --> V8["S0-v3"] --> V9["S2-v3"] --> V10["...150 vnodes each..."]
+    end
+
+    subgraph LoadComparison["Load Distribution Comparison"]
+        P["3 physical nodes only"] --- P0["S0: ~10%"]
+        P --- P1["S1: ~60%"]
+        P --- P2["S2: ~30%"]
+        Q["150 vnodes per server"] --- Q0["S0: ~33%"]
+        Q --- Q1["S1: ~34%"]
+        Q --- Q2["S2: ~33%"]
+    end
+
+    style V1 fill:#43a047,stroke:#2e7d32,color:#fff
+    style V4 fill:#43a047,stroke:#2e7d32,color:#fff
+    style V8 fill:#43a047,stroke:#2e7d32,color:#fff
+    style V2 fill:#1e88e5,stroke:#1565c0,color:#fff
+    style V5 fill:#1e88e5,stroke:#1565c0,color:#fff
+    style V9 fill:#1e88e5,stroke:#1565c0,color:#fff
+    style V3 fill:#e53935,stroke:#b71c1c,color:#fff
+    style V6 fill:#e53935,stroke:#b71c1c,color:#fff
+    style V7 fill:#e53935,stroke:#b71c1c,color:#fff
+          </div></div>
+
+          <h3>Virtual Node Count Guidelines</h3>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Vnodes per Server</th>
+                  <th>Std Dev of Load</th>
+                  <th>Memory Overhead</th>
+                  <th>Use Case</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>1 (no vnodes)</td>
+                  <td>~50%+</td>
+                  <td>Minimal</td>
+                  <td>Never use in production</td>
+                </tr>
+                <tr>
+                  <td>10&ndash;50</td>
+                  <td>~15&ndash;25%</td>
+                  <td>Low</td>
+                  <td>Small clusters, prototyping</td>
+                </tr>
+                <tr>
+                  <td>100&ndash;200</td>
+                  <td>~5&ndash;10%</td>
+                  <td>Moderate</td>
+                  <td>Production systems (recommended)</td>
+                </tr>
+                <tr>
+                  <td>500+</td>
+                  <td>~2&ndash;3%</td>
+                  <td>High</td>
+                  <td>Large clusters needing very tight balance</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>Handling Heterogeneous Servers</h3>
+          <p>Virtual nodes also solve the problem of servers with different capacities. Assign more virtual nodes to more powerful servers:</p>
+
+<pre><code>Server A (16 GB RAM):  100 virtual nodes
+Server B (32 GB RAM):  200 virtual nodes  ← 2x the vnodes, handles ~2x the keys
+Server C (64 GB RAM):  400 virtual nodes  ← 4x the vnodes, handles ~4x the keys</code></pre>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> Virtual nodes are the single most important improvement to basic consistent hashing. Always mention them proactively &mdash; it shows you understand the practical limitations of the basic algorithm and know the standard production solution.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- HASH FUNCTIONS -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="hash-functions"></span>
+        <section class="section">
+          <h2>4. Hash Functions</h2>
+
+          <p>The choice of hash function directly affects the uniformity of key distribution on the ring and the performance of lookups. A good hash function for consistent hashing must produce <strong>uniformly distributed</strong> outputs and be <strong>fast to compute</strong>.</p>
+
+          <h3>Hash Function Comparison</h3>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Hash Function</th>
+                  <th>Output Size</th>
+                  <th>Speed (ops/sec)</th>
+                  <th>Distribution Quality</th>
+                  <th>Cryptographic?</th>
+                  <th>Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>MD5</strong></td>
+                  <td>128 bits</td>
+                  <td>~300M</td>
+                  <td>Excellent</td>
+                  <td>Yes (broken)</td>
+                  <td>Widely used in legacy systems. Good distribution but slower than non-crypto alternatives. Used by Memcached&rsquo;s ketama algorithm.</td>
+                </tr>
+                <tr>
+                  <td><strong>SHA-1</strong></td>
+                  <td>160 bits</td>
+                  <td>~250M</td>
+                  <td>Excellent</td>
+                  <td>Yes (broken)</td>
+                  <td>Slightly slower than MD5. Overkill for consistent hashing since we don&rsquo;t need cryptographic properties.</td>
+                </tr>
+                <tr>
+                  <td><strong>MurmurHash3</strong></td>
+                  <td>32/128 bits</td>
+                  <td>~2B</td>
+                  <td>Excellent</td>
+                  <td>No</td>
+                  <td>Fast, excellent distribution. Used by Apache Cassandra. The go-to choice for most consistent hashing implementations.</td>
+                </tr>
+                <tr>
+                  <td><strong>xxHash</strong></td>
+                  <td>32/64/128 bits</td>
+                  <td>~5B</td>
+                  <td>Excellent</td>
+                  <td>No</td>
+                  <td>Fastest general-purpose hash. Excellent avalanche properties. Ideal for high-throughput systems.</td>
+                </tr>
+                <tr>
+                  <td><strong>FNV-1a</strong></td>
+                  <td>32/64 bits</td>
+                  <td>~1.5B</td>
+                  <td>Good</td>
+                  <td>No</td>
+                  <td>Simple implementation, decent speed. Slightly worse distribution than Murmur/xxHash. Used in some older systems.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="info-box note">
+            <strong>Key Insight:</strong> For consistent hashing, you do <strong>not</strong> need a cryptographic hash function. Cryptographic hashes (MD5, SHA) are designed to resist preimage attacks and collisions &mdash; properties irrelevant for load distribution. Non-cryptographic hashes like MurmurHash3 and xxHash provide equally good distribution at 5&ndash;10x the speed.
+          </div>
+
+          <h3>What Makes a Good Hash for Consistent Hashing?</h3>
+          <ul class="content-list">
+            <li><strong>Uniform distribution:</strong> Every bit of the output should be equally likely to be 0 or 1, regardless of input patterns. This ensures keys are spread evenly across the ring.</li>
+            <li><strong>Avalanche effect:</strong> A small change in input (e.g., <code>"key1"</code> vs <code>"key2"</code>) should produce a drastically different output. This prevents clustering of similar keys.</li>
+            <li><strong>Speed:</strong> The hash function is called for every key lookup. At millions of operations per second, even nanosecond differences matter.</li>
+            <li><strong>Determinism:</strong> The same input must always produce the same output, across all machines and restarts.</li>
+          </ul>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- REAL-WORLD USAGE -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="real-world-usage"></span>
+        <section class="section">
+          <h2>5. Real-World Usage</h2>
+
+          <p>Consistent hashing is a foundational building block in many large-scale distributed systems. Here are the most notable real-world applications:</p>
+
+          <div class="comparison-grid">
+            <div class="comparison-card">
+              <h4>Amazon DynamoDB</h4>
+              <p>DynamoDB uses consistent hashing to partition data across storage nodes. Each table&rsquo;s partition key is hashed to determine which storage partition owns the data. When partitions split or merge, only the affected key range moves &mdash; the rest of the table is untouched. Described in the original <em>Dynamo</em> paper (2007).</p>
+            </div>
+            <div class="comparison-card">
+              <h4>Apache Cassandra</h4>
+              <p>Cassandra uses consistent hashing with virtual nodes (vnodes) as its core data distribution mechanism. Each node owns multiple token ranges on the ring. By default, Cassandra assigns 256 vnodes per physical node (configurable via <code>num_tokens</code>). Uses MurmurHash3 as its default partitioner.</p>
+            </div>
+            <div class="comparison-card">
+              <h4>Discord</h4>
+              <p>Discord uses consistent hashing to route messages to the correct guild (server) process. When a user sends a message, the guild ID is hashed to determine which backend process handles it. This allows Discord to scale to millions of concurrent guilds while ensuring all messages for a guild are processed by the same node.</p>
+            </div>
+            <div class="comparison-card">
+              <h4>Akamai CDN</h4>
+              <p>Akamai (co-founded by Karger, one of the consistent hashing inventors) uses it to map content URLs to edge servers. When a user requests a resource, the URL is hashed to find the nearest edge server that caches it. Adding or removing edge servers only redirects a fraction of URLs, preventing cache stampedes across the CDN.</p>
+            </div>
+            <div class="comparison-card">
+              <h4>Memcached (Ketama)</h4>
+              <p>The Ketama algorithm is a consistent hashing implementation for Memcached clients. It distributes cache keys across a pool of Memcached servers. When a server is added or removed, only ~1/N of the keys are remapped, avoiding the thundering herd problem that would occur with naive <code>hash % N</code>. Uses MD5 with 160 virtual nodes per server.</p>
+            </div>
+            <div class="comparison-card">
+              <h4>Other Notable Uses</h4>
+              <ul class="content-list">
+                <li><strong>Riak:</strong> Dynamo-inspired key-value store using consistent hashing with a fixed 64-partition ring.</li>
+                <li><strong>Nginx:</strong> <code>upstream</code> module supports consistent hashing for load balancing backend servers.</li>
+                <li><strong>HAProxy:</strong> Consistent hashing mode for sticky session routing.</li>
+                <li><strong>Apache Kafka:</strong> Consumer group rebalancing uses a similar concept (though not classical consistent hashing).</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="info-box note">
+            <strong>Pattern:</strong> Consistent hashing appears wherever you need to distribute data or work across a dynamic set of nodes &mdash; caches, databases, CDNs, load balancers, and message routers. If the set of nodes can change at runtime, consistent hashing (or a variant) is almost certainly involved.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- IMPLEMENTATION DETAILS -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="implementation"></span>
+        <section class="section">
+          <h2>6. Implementation Details</h2>
+
+          <h3>Data Structure Choices</h3>
+          <p>The core operation is: given a key&rsquo;s hash position on the ring, find the next server position clockwise. This is a <strong>successor query</strong> &mdash; find the smallest ring position that is &ge; the key&rsquo;s position.</p>
+
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Data Structure</th>
+                  <th>Lookup</th>
+                  <th>Add/Remove Node</th>
+                  <th>Memory</th>
+                  <th>Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>Sorted Array + Binary Search</strong></td>
+                  <td>O(log N)</td>
+                  <td>O(N) &mdash; requires shifting elements</td>
+                  <td>Compact, cache-friendly</td>
+                  <td>Best for read-heavy workloads where nodes rarely change. Simple to implement.</td>
+                </tr>
+                <tr>
+                  <td><strong>Balanced BST (TreeMap)</strong></td>
+                  <td>O(log N)</td>
+                  <td>O(log N)</td>
+                  <td>Higher per-node overhead (pointers)</td>
+                  <td>Best when nodes are added/removed frequently. Java&rsquo;s <code>TreeMap.ceilingEntry()</code> gives the successor directly.</td>
+                </tr>
+                <tr>
+                  <td><strong>Skip List</strong></td>
+                  <td>O(log N)</td>
+                  <td>O(log N)</td>
+                  <td>Moderate</td>
+                  <td>Concurrent-friendly. Good for multi-threaded implementations.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <p>Here, <strong>N</strong> is the total number of points on the ring (physical servers &times; virtual nodes per server). With 100 physical servers and 150 vnodes each, N = 15,000 &mdash; binary search over 15K entries is extremely fast.</p>
+
+          <h3>Pseudocode Implementation</h3>
+<pre><code>class ConsistentHashRing:
+    ring: SortedMap&lt;Integer, String&gt;   // position → server_id
+    vnodes_per_server: int = 150
+
+    function addServer(server_id):
+        for i in 0..vnodes_per_server - 1:
+            position = hash(server_id + "#" + i)
+            ring.put(position, server_id)
+
+    function removeServer(server_id):
+        for i in 0..vnodes_per_server - 1:
+            position = hash(server_id + "#" + i)
+            ring.remove(position)
+
+    function getServer(key):
+        if ring.isEmpty():
+            return null
+        position = hash(key)
+        // Find the first server position >= key position (clockwise walk)
+        entry = ring.ceilingEntry(position)
+        if entry is null:
+            // Wrap around to the first server on the ring
+            entry = ring.firstEntry()
+        return entry.value   // server_id</code></pre>
+
+          <h3>Handling Replication</h3>
+          <p>In distributed databases, each key is replicated to N nodes for fault tolerance. To find the N replica nodes, walk clockwise from the key&rsquo;s position and collect <strong>N distinct physical servers</strong> (skipping virtual nodes that belong to an already-selected physical server):</p>
+
+<pre><code>function getReplicaNodes(key, replica_count):
+    position = hash(key)
+    replicas = []
+    seen_servers = Set()
+
+    // Walk clockwise from the key's position
+    for entry in ring.tailMap(position):
+        if entry.value not in seen_servers:
+            replicas.add(entry.value)
+            seen_servers.add(entry.value)
+        if replicas.size() == replica_count:
+            return replicas
+
+    // Wrap around if we haven't found enough replicas
+    for entry in ring.headMap(position):
+        if entry.value not in seen_servers:
+            replicas.add(entry.value)
+            seen_servers.add(entry.value)
+        if replicas.size() == replica_count:
+            return replicas
+
+    return replicas  // fewer replicas than requested (not enough servers)</code></pre>
+
+          <div class="flow-container">
+            <div class="flow-box">hash(key)</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Binary search on ring</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">Find ceiling entry</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Return server ID</div>
+          </div>
+
+          <div class="info-box warning">
+            <strong>Replication Pitfall:</strong> When collecting replica nodes, you must skip virtual nodes belonging to the same physical server. If you naively take the next N positions on the ring, you might select 3 virtual nodes that all map to the same physical server &mdash; giving you 1 actual replica instead of 3. Always track <em>distinct physical servers</em>.
+          </div>
+
+          <h3>Ring Membership Management</h3>
+          <p>In production systems, the ring membership (which servers are on the ring) must be consistent across all clients. Common approaches:</p>
+          <ul class="content-list">
+            <li><strong>ZooKeeper / etcd:</strong> Store the server list in a coordination service. Clients watch for changes and rebuild their local ring copy. Used by Kafka, HBase.</li>
+            <li><strong>Gossip protocol:</strong> Servers communicate membership changes peer-to-peer. Eventually consistent but highly available. Used by Cassandra, DynamoDB.</li>
+            <li><strong>Configuration service:</strong> A centralized config service (e.g., Consul) maintains the ring and pushes updates to clients.</li>
+          </ul>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- TRADE-OFFS -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="tradeoffs"></span>
+        <section class="section">
+          <h2>7. Trade-offs</h2>
+
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Decision</th>
+                  <th>Option A</th>
+                  <th>Option B</th>
+                  <th>Recommendation</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>Virtual node count</strong></td>
+                  <td>Few vnodes (10&ndash;50): less memory, faster ring operations, but uneven load distribution (~15&ndash;25% std dev).</td>
+                  <td>Many vnodes (150&ndash;200): more memory and slightly slower ring rebuilds, but near-uniform distribution (~5&ndash;10% std dev).</td>
+                  <td>Use 100&ndash;200 vnodes per server for production. The memory overhead is negligible (a few MB for thousands of servers) compared to the benefit of balanced load.</td>
+                </tr>
+                <tr>
+                  <td><strong>Hash function</strong></td>
+                  <td>Cryptographic (MD5, SHA-1): excellent distribution, well-understood, but 5&ndash;10x slower.</td>
+                  <td>Non-cryptographic (MurmurHash3, xxHash): equally good distribution, much faster.</td>
+                  <td>Use MurmurHash3 or xxHash. Cryptographic properties are unnecessary for consistent hashing, and the speed difference matters at high throughput.</td>
+                </tr>
+                <tr>
+                  <td><strong>Data structure</strong></td>
+                  <td>Sorted array + binary search: compact, cache-friendly, but O(N) insert/delete.</td>
+                  <td>Balanced BST (TreeMap): O(log N) insert/delete, but higher memory overhead.</td>
+                  <td>Sorted array if nodes change rarely (most caching scenarios). TreeMap if nodes change frequently (auto-scaling clusters).</td>
+                </tr>
+                <tr>
+                  <td><strong>Handling hotspots</strong></td>
+                  <td>Ignore: simple but some keys (e.g., celebrity user profiles) create uneven load regardless of ring balance.</td>
+                  <td>Hotspot mitigation: replicate hot keys to multiple servers, or use a secondary hash to split hot keys across sub-partitions.</td>
+                  <td>For most systems, vnodes handle balance well enough. For extreme hotspots, add an application-level caching layer or split hot keys explicitly.</td>
+                </tr>
+                <tr>
+                  <td><strong>Rebalancing strategy</strong></td>
+                  <td>Immediate: move all affected keys as soon as a node joins/leaves. Consistent but causes a burst of data transfer.</td>
+                  <td>Gradual: transfer keys in the background over minutes/hours. Less disruptive but temporarily inconsistent.</td>
+                  <td>Gradual rebalancing with read-repair. Serve stale data from the old node while transferring to the new node. Cassandra and DynamoDB use this approach.</td>
+                </tr>
+                <tr>
+                  <td><strong>Ring consistency</strong></td>
+                  <td>Strong consistency (ZooKeeper/etcd): all clients see the same ring at the same time. Requires coordination service.</td>
+                  <td>Eventual consistency (gossip): clients may temporarily disagree on ring membership. Simpler, more available.</td>
+                  <td>Eventual consistency for most distributed databases (Cassandra, DynamoDB). Strong consistency when routing correctness is critical (e.g., distributed locks).</td>
+                </tr>
+                <tr>
+                  <td><strong>Bounded vs Unbounded loads</strong></td>
+                  <td>Standard consistent hashing: a node can receive arbitrarily more load than average if keys are skewed.</td>
+                  <td>Bounded-load consistent hashing (Google, 2017): caps each node at (1 + &epsilon;) &times; average load. Overloaded nodes redirect to the next node on the ring.</td>
+                  <td>Use bounded-load variant when strict load balancing is required (e.g., load balancing HTTP requests). Standard is fine for data partitioning where slight imbalance is tolerable.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> Discussing trade-offs is where you differentiate yourself. Mentioning bounded-load consistent hashing (Google&rsquo;s 2017 paper) or the gossip-vs-ZooKeeper decision for ring membership shows depth beyond the textbook explanation.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- REVISION CHECKLIST -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="revision"></span>
+        <section class="section">
+          <h2>8. Revision Checklist</h2>
+          <p>Use this checklist to verify you can recall the key concepts before your interview.</p>
+
+          <div class="checklist">
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>Naive <code>hash % N</code> fails because changing N remaps nearly all keys (~90%). This causes cache avalanches and expensive data migrations in distributed systems.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>Consistent hashing maps both servers and keys onto a ring (0 to 2<sup>32</sup>&minus;1). Each key is assigned to the first server found by walking clockwise from the key&rsquo;s position.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>When a server is added or removed, only ~K/N keys are remapped (where K = total keys, N = number of servers). This is the theoretical minimum for balanced redistribution.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>Basic consistent hashing suffers from non-uniform distribution. Virtual nodes (100&ndash;200 per server) solve this by giving each server multiple positions on the ring, reducing load standard deviation from 50%+ to ~5&ndash;10%.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>Virtual nodes also enable heterogeneous clusters: assign more vnodes to more powerful servers so they handle proportionally more keys.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>Use non-cryptographic hash functions (MurmurHash3, xxHash) for consistent hashing. They provide equally good distribution at 5&ndash;10x the speed of MD5/SHA-1.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>Implementation uses a sorted data structure (TreeMap or sorted array) with O(log N) lookup via ceiling/successor query. N is total vnodes across all servers.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>For replication, walk clockwise collecting N <em>distinct physical servers</em> (not just N ring positions) to avoid placing all replicas on the same physical node.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>Real-world usage: Amazon DynamoDB, Apache Cassandra (MurmurHash3, 256 vnodes), Memcached (Ketama, MD5), Akamai CDN, Discord.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>Ring membership is managed via ZooKeeper/etcd (strong consistency) or gossip protocol (eventual consistency). Cassandra and DynamoDB use gossip; Kafka and HBase use ZooKeeper.</span>
+            </label>
+          </div>
+        </section>
+
+        <!-- Bottom nav -->
+        <div class="problem-nav">
+          <a href="rate-limiter.html"><span class="nav-label">Previous</span><span class="nav-title">Rate Limiter</span></a>
+          <a href="key-value-store.html" class="next"><span class="nav-label">Next</span><span class="nav-title">Key-Value Store</span></a>
+        </div>
+      </div>
+    </div>
+  </main>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script src="../js/app.js"></script>
+</body>
+</html>

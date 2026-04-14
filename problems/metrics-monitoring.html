@@ -1,0 +1,1035 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Design Metrics Monitoring &mdash; HLD Interview Prep</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+  <nav class="top-nav">
+    <div class="top-nav-inner">
+      <a href="../index.html" class="nav-logo">
+        <div class="nav-logo-icon">SD</div>
+        <span>HLD Interview Prep</span>
+      </a>
+      <div class="nav-actions">
+        <div class="nav-breadcrumb">
+          <a href="../index.html">Home</a>
+          <span class="separator">/</span>
+          <span class="current">Metrics Monitoring</span>
+        </div>
+        <button class="theme-toggle" id="theme-toggle">&#x263E;</button>
+      </div>
+    </div>
+  </nav>
+  <div class="scroll-progress"></div>
+
+  <main class="main-content">
+    <div class="problem-page">
+      <!-- Sidebar TOC -->
+      <aside class="sidebar">
+        <div class="sidebar-title">On This Page</div>
+        <ul class="toc-list">
+          <li><a href="#requirements">Requirements</a></li>
+          <li><a href="#estimation">Capacity Estimation</a></li>
+          <li><a href="#data-model">Data Model</a></li>
+          <li><a href="#high-level-design">High-Level Design</a></li>
+          <li><a href="#deep-dive">Deep Dive</a></li>
+          <li><a href="#tradeoffs">Trade-offs</a></li>
+          <li><a href="#revision">Revision Checklist</a></li>
+        </ul>
+        <div class="progress-bar"><div class="progress-fill" style="width: 0%"></div></div>
+      </aside>
+
+      <div class="problem-content">
+        <!-- Header -->
+        <div class="problem-header">
+          <h1>Design Metrics Monitoring &amp; Alerting</h1>
+          <p class="problem-subtitle">Design a scalable metrics monitoring and alerting system like Datadog or Prometheus &mdash; supporting collection of infrastructure and application metrics (CPU, memory, disk, network, custom business metrics), time-series storage with long-term retention and downsampling, flexible querying and dashboard visualization, and configurable alerting with threshold-based and anomaly detection rules.</p>
+          <div class="problem-meta-bar">
+            <span class="meta-badge difficulty-medium">Medium</span>
+            <span class="meta-badge">Platform</span>
+            <span class="meta-badge">Asked at: Datadog, Amazon, Google</span>
+          </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- REQUIREMENTS -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="requirements"></span>
+        <section class="section">
+          <h2>1. Requirements</h2>
+
+          <h3>Functional Requirements</h3>
+          <ul class="content-list">
+            <li><strong>Collect metrics from servers, services, and applications</strong> &mdash; Support infrastructure metrics (CPU utilization, memory usage, disk I/O, network throughput) and custom business metrics (request count, error rate, checkout conversions). Agents running on each host collect and forward metrics at a configurable interval.</li>
+            <li><strong>Store time-series data efficiently</strong> &mdash; Each data point is a (metric_name, tags, timestamp, value) tuple. The system must handle extremely high write throughput and store data for long retention periods with automatic downsampling to manage storage costs.</li>
+            <li><strong>Query and visualize metrics via dashboards</strong> &mdash; Users create dashboards with panels that query metrics over time ranges. Support time-range queries, aggregation functions (avg, sum, min, max, count, p50, p95, p99), GROUP BY tags (e.g., by host, region, service), and a query language (PromQL-like).</li>
+            <li><strong>Configurable alerting</strong> &mdash; Define alert rules based on metric thresholds (e.g., CPU &gt; 90% for 5 minutes), rate of change, or anomaly detection. Alerts transition through states: pending &rarr; firing &rarr; resolved. Notifications sent via PagerDuty, Slack, email, or webhooks.</li>
+            <li><strong>Support aggregation over time windows</strong> &mdash; Compute rolling aggregations: avg, sum, p99, count over configurable time windows (1 min, 5 min, 1 hr). Support both real-time streaming aggregation and historical batch aggregation for dashboard queries.</li>
+          </ul>
+
+          <h3>Non-Functional Requirements</h3>
+          <ul class="content-list">
+            <li><strong>Scale:</strong> 100K servers, each emitting 1,000 metrics, collected every 10 seconds. This produces 10 million data points per second sustained write throughput.</li>
+            <li><strong>Retention:</strong> 1 year of data. Raw resolution (10s) kept for 7 days, 1-minute aggregates for 30 days, 1-hour aggregates for 1 year. Automatic downsampling reduces storage by ~99%.</li>
+            <li><strong>Write throughput:</strong> The system must ingest 10M data points/sec (~1 GB/sec) with no backpressure on agents. Writes must be durable &mdash; no silent data loss.</li>
+            <li><strong>Query latency:</strong> Dashboard queries must return within 1 second for typical time ranges (last 1 hour, last 24 hours). Queries over longer ranges (30 days) may take 2&ndash;5 seconds using pre-aggregated data.</li>
+            <li><strong>High availability:</strong> The monitoring system must be more reliable than the systems it monitors. Target 99.99% uptime. Alerting pipeline must have no single point of failure &mdash; a missed alert can cause an outage to go undetected.</li>
+          </ul>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> Start by clarifying the scope: &ldquo;Are we designing a metrics system (numerical time-series data like CPU, latency, request count) or a logging system (unstructured text logs)?&rdquo; These are fundamentally different. Metrics are fixed-schema numerical values sampled at regular intervals &mdash; they compress well and support mathematical aggregation. Logs are variable-length text events &mdash; they require full-text indexing and different storage strategies. This design focuses on metrics. Also clarify: &ldquo;Is this a pull-based system (like Prometheus, where the server scrapes targets) or push-based (like Datadog/StatsD, where agents push to the server)?&rdquo; We will discuss both approaches.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- ESTIMATION -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="estimation"></span>
+        <section class="section">
+          <h2>2. Capacity Estimation</h2>
+
+          <h3>Assumptions</h3>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Parameter</th>
+                  <th>Value</th>
+                  <th>Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Number of servers</td>
+                  <td>100,000</td>
+                  <td>Across all data centers and services</td>
+                </tr>
+                <tr>
+                  <td>Metrics per server</td>
+                  <td>1,000</td>
+                  <td>CPU, memory, disk, network, app-level, custom</td>
+                </tr>
+                <tr>
+                  <td>Collection interval</td>
+                  <td>10 seconds</td>
+                  <td>6 samples per minute per metric</td>
+                </tr>
+                <tr>
+                  <td>Total data points/sec</td>
+                  <td>10 million</td>
+                  <td>100K &times; 1,000 &divide; 10 = 10M points/sec</td>
+                </tr>
+                <tr>
+                  <td>Data point size</td>
+                  <td>~100 bytes</td>
+                  <td>metric_name + tags + timestamp + value (uncompressed)</td>
+                </tr>
+                <tr>
+                  <td>Write bandwidth</td>
+                  <td>~1 GB/sec</td>
+                  <td>10M &times; 100 bytes = 1 GB/sec (uncompressed)</td>
+                </tr>
+                <tr>
+                  <td>Retention</td>
+                  <td>1 year</td>
+                  <td>With downsampling at multiple resolutions</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>Storage Calculation</h3>
+<pre><code>RAW DATA (10-second resolution, 7-day retention):
+  10M points/sec &times; 86,400 sec/day = 864 billion points/day
+  864B points &times; 7 days = 6.05 trillion points
+
+  Uncompressed: 6.05T &times; 100 bytes = 605 TB
+  With TSDB compression (12x, Gorilla encoding): 605 TB / 12 &asymp; 50 TB
+
+1-MINUTE AGGREGATES (30-day retention):
+  Raw points reduced by 6x (60s / 10s = 6 samples &rarr; 1 aggregate)
+  10M / 6 = 1.67M points/sec at 1-min resolution
+  1.67M &times; 86,400 &times; 30 days = 4.3 trillion points
+  With compression: 4.3T &times; 16 bytes / 12 &asymp; 5.7 TB
+
+1-HOUR AGGREGATES (1-year retention):
+  1-min points reduced by 60x (60 min &rarr; 1 aggregate)
+  1.67M / 60 = 27.8K points/sec at 1-hr resolution
+  27.8K &times; 86,400 &times; 365 days = 877 billion points
+  With compression: 877B &times; 16 bytes / 12 &asymp; 1.2 TB
+
+TOTAL STORAGE:
+  Raw (7d):     ~50 TB
+  1-min (30d):  ~5.7 TB
+  1-hr (1yr):   ~1.2 TB
+  ────────────────────────
+  Total:        ~57 TB (vs. ~31 PB without downsampling!)
+
+Downsampling reduces 1-year storage from 31 PB to 57 TB &mdash; a 99.8% reduction.</code></pre>
+
+          <h3>Throughput Requirements</h3>
+<pre><code>WRITE PATH:
+  10M data points/sec ingestion
+  With batching and compression: ~100 MB/sec effective write I/O
+  Across 20 TSDB nodes: ~5 MB/sec per node (very manageable)
+
+READ PATH (QUERIES):
+  Assume 1,000 dashboard queries/sec (across all users)
+  Each query scans ~10K&ndash;1M data points
+  With pre-aggregated rollups: most queries hit 1-min or 1-hr data
+  Target: &lt;1 second per query
+
+ALERTING:
+  10,000 alert rules evaluated every 60 seconds
+  Each rule queries 1&ndash;10 time series
+  ~100K time-series evaluations per minute</code></pre>
+
+          <div class="info-box note">
+            <strong>Key Insight:</strong> The numbers reveal that a metrics system is a <strong>write-heavy, read-light</strong> workload. 10M writes/sec but only ~1K queries/sec. This is the opposite of most web applications. The storage engine must be optimized for high write throughput and time-range scans, not random reads or point lookups. This is exactly why purpose-built time-series databases (not general-purpose RDBMS or key-value stores) are essential. Downsampling is the single most impactful optimization &mdash; it reduces storage by 99.8% and makes long-range queries fast by reading pre-aggregated data instead of billions of raw points.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- DATA MODEL -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="data-model"></span>
+        <section class="section">
+          <h2>3. Data Model</h2>
+
+          <h3>Time-Series Data Structure</h3>
+          <p>Every metric data point consists of four components: a metric name, a set of key-value tags (labels), a timestamp, and a numeric value. Tags enable multi-dimensional querying &mdash; you can filter, group, and aggregate by any combination of tags.</p>
+
+          <div class="diagram-box">
+<pre>
+    TIME-SERIES DATA POINT
+    &equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;
+
+    ┌─────────────────────────────────────────────────────┐
+    │  METRIC DATA POINT                                  │
+    ├──────────────┬──────────────────────────────────────┤
+    │  metric_name │  "http.request.duration"             │
+    ├──────────────┼──────────────────────────────────────┤
+    │  tags        │  {                                   │
+    │  (labels)    │    host: "web-server-042",           │
+    │              │    region: "us-east-1",              │
+    │              │    service: "api-gateway",           │
+    │              │    method: "GET",                    │
+    │              │    status_code: "200",               │
+    │              │    endpoint: "/v1/users"             │
+    │              │  }                                   │
+    ├──────────────┼──────────────────────────────────────┤
+    │  timestamp   │  1702483200  (Unix epoch seconds)    │
+    ├──────────────┼──────────────────────────────────────┤
+    │  value       │  42.5  (float64 &mdash; milliseconds)     │
+    └──────────────┴──────────────────────────────────────┘
+
+
+    A TIME SERIES is a unique combination of metric_name + tags:
+    ────────────────────────────────────────────────────────
+
+    Time Series A:
+      metric: "cpu.utilization"
+      tags: {host: "web-01", region: "us-east-1"}
+      data: [(t1, 45.2), (t2, 47.8), (t3, 52.1), (t4, 48.9), ...]
+
+    Time Series B:
+      metric: "cpu.utilization"
+      tags: {host: "web-02", region: "us-east-1"}
+      data: [(t1, 62.3), (t2, 58.1), (t3, 61.7), (t4, 59.4), ...]
+
+    Same metric name, different tags = different time series.
+
+    Total unique time series = metrics &times; unique tag combinations
+    100K hosts &times; 1,000 metrics = 100 million unique time series
+
+
+    METRIC TYPES:
+    ────────────────────────────────────────────────────────
+
+    GAUGE:     A value that goes up and down (CPU %, memory %)
+               Represents a snapshot at a point in time.
+               Query: avg, min, max over time window.
+
+    COUNTER:   A monotonically increasing value (total requests)
+               Resets to 0 on process restart.
+               Query: rate() to compute per-second change.
+
+    HISTOGRAM: Distribution of values (request latency)
+               Pre-computed buckets: [0-10ms, 10-50ms, 50-100ms, ...]
+               Query: p50, p95, p99 percentiles.
+
+    SUMMARY:   Similar to histogram but computed client-side.
+               Streams pre-calculated quantiles (p50, p99).
+               Cannot be aggregated across instances.
+</pre>
+          </div>
+
+          <h3>Time-Series Database Internals</h3>
+          <div class="diagram-box">
+<pre>
+    TSDB STORAGE ENGINE &mdash; COLUMNAR + COMPRESSION
+    &equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;
+
+    WHY REGULAR DATABASES DON'T WORK:
+    ────────────────────────────────────────────────────────
+
+    PostgreSQL / MySQL:
+    &bull; Row-oriented storage: each row stored contiguously
+    &bull; B-tree indexes: optimized for point lookups, not range scans
+    &bull; 10M inserts/sec would overwhelm write-ahead log
+    &bull; Time-range queries scan entire table (no time partitioning)
+    &bull; No built-in compression for time-series patterns
+    &bull; Storage: ~200 bytes/point (row overhead, indexes)
+
+    Time-Series DB (e.g., Prometheus TSDB, InfluxDB, TimescaleDB):
+    &bull; Columnar storage: timestamps and values stored separately
+    &bull; Time-partitioned: data split into time blocks (2-hour chunks)
+    &bull; Specialized compression: 16 bytes/point &rarr; ~1.4 bytes/point
+    &bull; Append-only: no random updates, no write amplification
+    &bull; Optimized for time-range scans: sequential reads within block
+    &bull; 140x less storage than a general-purpose RDBMS
+
+
+    GORILLA COMPRESSION (Facebook, 2015):
+    ────────────────────────────────────────────────────────
+
+    Key insight: consecutive timestamps and values in a time
+    series are highly correlated. Exploit this with delta encoding.
+
+    TIMESTAMP COMPRESSION (Delta-of-Delta):
+    ┌─────────────────────────────────────────────────────┐
+    │  Raw timestamps:     1000, 1010, 1020, 1030, 1040  │
+    │  Deltas:                   10,   10,   10,   10    │
+    │  Delta-of-deltas:               0,    0,    0     │
+    │                                                     │
+    │  Most delta-of-deltas are 0 (regular intervals)!    │
+    │  Encode 0 as a single bit: '0'                      │
+    │                                                     │
+    │  Result: 8-byte timestamp &rarr; 1 bit (64x compression) │
+    │                                                     │
+    │  For irregular intervals, use variable-length encoding│
+    │  based on the magnitude of the delta-of-delta.       │
+    └─────────────────────────────────────────────────────┘
+
+    VALUE COMPRESSION (XOR Encoding):
+    ┌─────────────────────────────────────────────────────┐
+    │  Raw values (float64): 45.2, 45.3, 45.1, 45.4      │
+    │                                                     │
+    │  XOR consecutive values:                            │
+    │    45.2 XOR 45.3 = 00000...0010110  (few bits set)  │
+    │    45.3 XOR 45.1 = 00000...0011010  (few bits set)  │
+    │                                                     │
+    │  Key insight: XOR of similar floats has mostly 0s.   │
+    │  Encode only the position and length of the          │
+    │  non-zero bits (leading zeros + meaningful bits).    │
+    │                                                     │
+    │  Result: 8-byte float &rarr; ~1&ndash;3 bytes average          │
+    │                                                     │
+    │  If values are identical (common for counters at 0): │
+    │    XOR = 0 &rarr; encode as single bit '0'               │
+    └─────────────────────────────────────────────────────┘
+
+    OVERALL COMPRESSION:
+    ────────────────────────────────────────────────────────
+
+    Uncompressed: 16 bytes/point (8B timestamp + 8B value)
+    Gorilla compressed: ~1.37 bytes/point (Facebook's result)
+    Compression ratio: ~12x
+
+    For 10M points/sec:
+      Uncompressed: 160 MB/sec
+      Compressed:    13 MB/sec  (very manageable!)
+</pre>
+          </div>
+
+          <h3>Storage Layout</h3>
+          <div class="diagram-box">
+<pre>
+    TSDB BLOCK LAYOUT (Prometheus-style)
+    &equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;
+
+    Data is organized into time-partitioned BLOCKS:
+
+    data/
+    ├── block-01HQRS.../          (2-hour block: 00:00&ndash;02:00)
+    │   ├── meta.json             (time range, stats, version)
+    │   ├── index                 (inverted index: label &rarr; series IDs)
+    │   ├── chunks/
+    │   │   ├── 000001            (compressed time-series chunks)
+    │   │   └── 000002
+    │   └── tombstones            (deletion markers)
+    │
+    ├── block-01HQRT.../          (2-hour block: 02:00&ndash;04:00)
+    │   ├── meta.json
+    │   ├── index
+    │   ├── chunks/
+    │   └── tombstones
+    │
+    ├── wal/                      (Write-Ahead Log for in-flight data)
+    │   ├── 00000001
+    │   ├── 00000002
+    │   └── checkpoint.00000001
+    │
+    └── head                      (in-memory block for current data)
+
+
+    WRITE PATH:
+    ────────────────────────────────────────────────────────
+
+    1. Data point arrives
+    2. Written to WAL (durability)
+    3. Appended to in-memory HEAD block
+    4. HEAD block compressed and flushed to disk every 2 hours
+    5. Older blocks compacted (merged) for query efficiency
+    6. Blocks beyond retention period deleted
+
+
+    INVERTED INDEX (for tag-based lookups):
+    ────────────────────────────────────────────────────────
+
+    Given query: cpu.utilization{region="us-east-1", service="api"}
+
+    Index structure:
+      "region=us-east-1"  &rarr;  [series_1, series_5, series_42, ...]
+      "service=api"       &rarr;  [series_1, series_7, series_42, ...]
+
+    Intersection: [series_1, series_42, ...]
+
+    Then fetch compressed chunks for those series IDs
+    within the requested time range.
+</pre>
+          </div>
+
+          <div class="info-box note">
+            <strong>Key Insight:</strong> The combination of time-partitioned blocks, Gorilla compression, and inverted indexes is what makes a TSDB handle 10M writes/sec and sub-second queries. Time partitioning means queries only touch relevant blocks (a 1-hour query reads 1 block, not the entire dataset). Gorilla compression reduces storage by 12x. The inverted index enables fast tag-based filtering without scanning all series. This is fundamentally different from how a relational database would approach the problem.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- HIGH-LEVEL DESIGN -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="high-level-design"></span>
+        <section class="section">
+          <h2>4. High-Level Design</h2>
+
+          <p>The architecture follows a pipeline pattern: <strong>Collect &rarr; Ingest &rarr; Store &rarr; Query &rarr; Visualize &rarr; Alert</strong>. Each stage is independently scalable. A message queue (Kafka) decouples collection from storage, absorbing traffic bursts and preventing backpressure on agents.</p>
+
+          <h3>System Architecture</h3>
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    subgraph Sources["DATA SOURCES (100K servers, 10M pts/sec)"]
+        S1["Server 1<br/>Agent"]
+        S2["Server 2<br/>Agent"]
+        SN["Server N<br/>Agent"]
+    end
+
+    subgraph Ingestion["INGESTION LAYER"]
+        Kafka["Kafka Cluster<br/>Topic: raw-metrics<br/>100 partitions<br/>Partitioned by hash(tags)"]
+        SP["Stream Processors<br/>- Validation<br/>- Normalization<br/>- Aggregation<br/>- Downsampling"]
+    end
+
+    subgraph Storage["STORAGE LAYER"]
+        TSDB["Time-Series Database (TSDB)"]
+        N1["Node 1 (shard A)"]
+        N2["Node 2 (shard B)"]
+        NN["Node N (shard N)"]
+    end
+
+    subgraph QueryVis["QUERY & VISUALIZATION"]
+        QS["Query Service<br/>- PromQL-like engine<br/>- Time-range scans<br/>- Aggregation functions<br/>- Caching layer"]
+        DS["Dashboard Service<br/>- Pre-computed rollups<br/>- Grafana-like UI<br/>- Real-time updates"]
+    end
+
+    subgraph Alerting["ALERTING LAYER"]
+        ARE["Alert Rule Evaluator<br/>- 10K rules<br/>- Evaluated every 60s<br/>- Threshold & anomaly checks"]
+        AM["Alert Manager<br/>- Deduplication<br/>- Grouping<br/>- Silencing<br/>- Routing"]
+        NOTIFY["PagerDuty / Slack / Email"]
+    end
+
+    S1 --> Kafka
+    S2 --> Kafka
+    SN --> Kafka
+    Kafka --> SP
+    SP --> TSDB
+    TSDB --> N1
+    TSDB --> N2
+    TSDB --> NN
+    TSDB --> QS
+    QS --> DS
+    TSDB --> ARE
+    ARE --> AM
+    AM --> NOTIFY
+          </div></div>
+
+          <h3>Data Flow</h3>
+          <div class="flow-container">
+            <div class="flow-box">Agents collect metrics on hosts</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Push to Kafka (buffering)</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">Stream processors validate &amp; aggregate</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Write to TSDB (compressed)</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">Query service reads from TSDB</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Dashboards &amp; Alerts</div>
+          </div>
+
+          <h3>Key Components</h3>
+          <div class="comparison-grid">
+            <div class="comparison-card">
+              <h4>Metrics Agent</h4>
+<pre><code>Lightweight daemon on every host.
+Responsibilities:
+&bull; Collect system metrics (CPU, mem, disk,
+  network) from /proc, /sys, OS APIs
+&bull; Scrape application metrics from
+  /metrics HTTP endpoints
+&bull; Buffer locally (survive brief network
+  outages)
+&bull; Batch and compress before sending
+&bull; Add host-level tags (hostname, region,
+  availability zone)
+
+Examples: Datadog Agent, Telegraf,
+  Prometheus Node Exporter,
+  collectd, StatsD</code></pre>
+            </div>
+            <div class="comparison-card">
+              <h4>Ingestion &amp; Storage</h4>
+<pre><code>Kafka absorbs 10M points/sec burst.
+Stream processors (Flink/Spark):
+&bull; Validate data (reject malformed points)
+&bull; Normalize metric names and tags
+&bull; Compute real-time aggregations
+&bull; Route to appropriate TSDB shard
+
+TSDB cluster (20+ nodes):
+&bull; Sharded by metric_name + tags hash
+&bull; Each node handles a subset of series
+&bull; Gorilla compression (12x)
+&bull; Time-partitioned blocks (2-hour chunks)
+&bull; Automatic downsampling jobs
+&bull; Replication factor 2&ndash;3 for durability</code></pre>
+            </div>
+          </div>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> Emphasize why Kafka sits between agents and the TSDB. Without Kafka, a TSDB outage or slowdown would cause agents to buffer indefinitely and eventually drop data. Kafka provides: (1) <strong>decoupling</strong> &mdash; agents and TSDB scale independently, (2) <strong>buffering</strong> &mdash; absorbs traffic spikes without backpressure, (3) <strong>durability</strong> &mdash; data is safe in Kafka even if TSDB is temporarily down, (4) <strong>fan-out</strong> &mdash; multiple consumers (TSDB writer, alerting pipeline, anomaly detection) can read the same data independently.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- DEEP DIVE -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="deep-dive"></span>
+        <section class="section">
+          <h2>5. Deep Dive</h2>
+
+          <!-- 5a. Data Collection -->
+          <h3>5a. Data Collection &mdash; Pull vs. Push</h3>
+          <p>There are two fundamental approaches to collecting metrics: <strong>pull-based</strong> (the monitoring server scrapes targets) and <strong>push-based</strong> (agents push metrics to the server). Each has distinct trade-offs.</p>
+
+          <div class="comparison-grid">
+            <div class="comparison-card">
+              <h4>Pull-Based (Prometheus Model)</h4>
+<pre><code>HOW IT WORKS:
+The monitoring server periodically scrapes
+HTTP endpoints on each target.
+
+  Prometheus ──HTTP GET /metrics──▶ Target
+  Prometheus ◀── metric data ──── Target
+
+Each target exposes a /metrics endpoint:
+  # HELP http_requests_total Total requests
+  # TYPE http_requests_total counter
+  http_requests_total{method="GET"} 1234
+  http_requests_total{method="POST"} 567
+
+  # TYPE cpu_usage gauge
+  cpu_usage{core="0"} 45.2
+  cpu_usage{core="1"} 62.8
+
+ADVANTAGES:
+&bull; Server controls scrape frequency
+&bull; Easy to detect if a target is down
+  (scrape fails = target unhealthy)
+&bull; No agent needed (app exposes /metrics)
+&bull; Simple debugging: curl the endpoint
+&bull; No firewall issues (server initiates)
+
+DISADVANTAGES:
+&bull; Doesn't scale well beyond ~100K targets
+  (server must track all targets)
+&bull; Requires service discovery (which
+  targets to scrape?)
+&bull; Short-lived jobs may be missed between
+  scrape intervals
+&bull; Targets must be network-reachable from
+  the monitoring server</code></pre>
+            </div>
+            <div class="comparison-card">
+              <h4>Push-Based (Datadog/StatsD Model)</h4>
+<pre><code>HOW IT WORKS:
+Agents on each host push metrics to a
+central collection service.
+
+  Agent ──push metrics──▶ Collection API
+                          (load balanced)
+
+Agent batches metrics locally, compresses,
+and sends via HTTP/gRPC every 10 seconds:
+  POST /api/v1/metrics
+  {
+    "series": [
+      {
+        "metric": "cpu.utilization",
+        "tags": ["host:web-01", "region:us-east"],
+        "points": [[1702483200, 45.2],
+                    [1702483210, 47.8]]
+      }
+    ]
+  }
+
+ADVANTAGES:
+&bull; Scales to millions of hosts (stateless
+  collection API behind load balancer)
+&bull; Works behind firewalls/NATs (agent
+  initiates outbound connection)
+&bull; Short-lived jobs can push final metrics
+  before exiting
+&bull; Agent can buffer during network outages
+&bull; Better for cloud/ephemeral environments
+
+DISADVANTAGES:
+&bull; Can't easily detect if a host is down
+  (absence of data vs. network issue)
+&bull; Risk of overwhelming the collection
+  service (need rate limiting)
+&bull; Requires agent installation on every host
+&bull; Agent adds resource overhead on hosts</code></pre>
+            </div>
+          </div>
+
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Aspect</th>
+                  <th>Pull (Prometheus)</th>
+                  <th>Push (Datadog/StatsD)</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>Scale</strong></td>
+                  <td>~100K targets per server (limited by scrape capacity)</td>
+                  <td>Millions of hosts (stateless collection tier)</td>
+                </tr>
+                <tr>
+                  <td><strong>Health detection</strong></td>
+                  <td>Built-in (failed scrape = target down)</td>
+                  <td>Requires separate liveness tracking</td>
+                </tr>
+                <tr>
+                  <td><strong>Firewall/NAT</strong></td>
+                  <td>Server must reach targets (problematic behind NAT)</td>
+                  <td>Agent initiates outbound (works behind NAT)</td>
+                </tr>
+                <tr>
+                  <td><strong>Short-lived jobs</strong></td>
+                  <td>May miss data between scrapes (use Pushgateway)</td>
+                  <td>Agent pushes final metrics before exit</td>
+                </tr>
+                <tr>
+                  <td><strong>Agent required</strong></td>
+                  <td>No (app exposes /metrics endpoint)</td>
+                  <td>Yes (agent daemon on every host)</td>
+                </tr>
+                <tr>
+                  <td><strong>Used by</strong></td>
+                  <td>Prometheus, Thanos, Cortex, Victoria Metrics</td>
+                  <td>Datadog, Graphite, StatsD, InfluxDB, New Relic</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="info-box note">
+            <strong>Hybrid approach:</strong> In practice, large-scale systems use both. Prometheus pulls from service endpoints within a cluster, while a push-based agent handles infrastructure metrics and cross-network collection. Datadog&rsquo;s agent, for example, both pushes its own collected metrics and can scrape Prometheus-format endpoints locally, then pushes everything to Datadog&rsquo;s backend. For this design at 100K servers, a <strong>push-based architecture</strong> is more appropriate because it scales horizontally with a stateless collection tier and works across network boundaries.
+          </div>
+
+          <!-- 5b. Time-Series Database -->
+          <h3>5b. Time-Series Database &mdash; Why Regular DBs Don&rsquo;t Work</h3>
+          <p>A time-series database is purpose-built for the unique access patterns of metrics data: extremely high write throughput, append-only workload, time-range scans, and mathematical aggregation. General-purpose databases fail at this scale.</p>
+
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Characteristic</th>
+                  <th>General-Purpose DB (PostgreSQL)</th>
+                  <th>Time-Series DB (Prometheus TSDB)</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>Write pattern</strong></td>
+                  <td>Random writes (B-tree updates, WAL)</td>
+                  <td>Append-only sequential writes (LSM-tree / log-structured)</td>
+                </tr>
+                <tr>
+                  <td><strong>Write throughput</strong></td>
+                  <td>~50K inserts/sec (single node)</td>
+                  <td>~2M+ inserts/sec (single node, compressed)</td>
+                </tr>
+                <tr>
+                  <td><strong>Storage per point</strong></td>
+                  <td>~200 bytes (row overhead, indexes, MVCC)</td>
+                  <td>~1.4 bytes (Gorilla compression)</td>
+                </tr>
+                <tr>
+                  <td><strong>Compression</strong></td>
+                  <td>Generic (TOAST, LZ4 on pages)</td>
+                  <td>Domain-specific (delta-of-delta, XOR float encoding)</td>
+                </tr>
+                <tr>
+                  <td><strong>Time-range queries</strong></td>
+                  <td>B-tree index scan (random I/O)</td>
+                  <td>Sequential scan of time-partitioned blocks</td>
+                </tr>
+                <tr>
+                  <td><strong>Retention management</strong></td>
+                  <td>DELETE + VACUUM (expensive, locks)</td>
+                  <td>Drop entire time block (instant, no fragmentation)</td>
+                </tr>
+                <tr>
+                  <td><strong>Downsampling</strong></td>
+                  <td>Manual (custom jobs, materialized views)</td>
+                  <td>Built-in (automatic rollup to lower resolutions)</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    DP["Data point arrives"] --> WAL
+    WAL["Write-Ahead Log (WAL)<br/>Durability: written first<br/>Sequential append (fast)"]
+    WAL --> MT
+    MT["MemTable (in RAM)<br/>In-memory sorted structure<br/>Holds recent data (~2 hours)<br/>Fast writes: O(log n) insert"]
+    MT -->|"Flush when full<br/>(size or time limit)"| L0
+    L0["Level 0 (on disk)<br/>Immutable sorted files (SSTables)<br/>Each file covers a time range"]
+    L0 -->|"Background<br/>compaction"| L1
+    L1["Level 1 (on disk)<br/>Merged and sorted files<br/>Non-overlapping time ranges"]
+    L1 --> L2
+    L2["Level 2+ (on disk)<br/>Further compacted, larger files<br/>Optimal for range scans"]
+          </div></div>
+
+          <!-- 5c. Downsampling -->
+          <h3>5c. Downsampling &mdash; The 99% Storage Reduction</h3>
+          <p>Downsampling is the process of reducing data resolution over time. Raw 10-second data is aggregated into 1-minute summaries, which are further aggregated into 1-hour summaries. This is the single most impactful optimization in a metrics system.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    RAW["RAW DATA<br/>10-second intervals<br/>7-day retention<br/>6 data points per minute"]
+    RAW -->|"Aggregate<br/>(avg, min, max, sum, count)"| MIN1
+    MIN1["1-MINUTE AGGREGATES<br/>30-day retention<br/>6 raw points to 1 aggregate<br/>Storage reduction: ~6x"]
+    MIN1 -->|"Aggregate<br/>(avg, min, max, sum, count)"| HR1
+    HR1["1-HOUR AGGREGATES<br/>1-year retention<br/>60 one-min aggregates to 1 hourly<br/>Storage reduction: ~60x"]
+
+    subgraph Routing["QUERY ROUTING BY TIME RANGE"]
+        direction LR
+        Q1["Last 1 hour -> 10s raw data"]
+        Q2["Last 24 hours -> 1-min aggregates"]
+        Q3["Last 7 days -> 5-min aggregates"]
+        Q4["Last 30 days -> 1-hr aggregates"]
+        Q5["Last 1 year -> 1-hr aggregates"]
+    end
+
+    RAW -.-> Q1
+    MIN1 -.-> Q2
+    MIN1 -.-> Q3
+    HR1 -.-> Q4
+    HR1 -.-> Q5
+          </div></div>
+
+          <div class="info-box important">
+            <strong>Why store min/max/sum/count in aggregates, not just avg?</strong> If you only store the average, you lose information. You cannot compute the average of averages correctly (it ignores different sample counts). By storing sum and count, you can compute the correct weighted average over any time range. By storing min and max, you preserve extreme values that would be lost in averaging. For percentiles (p95, p99), you need to store histogram bucket counts or use approximate data structures like t-digest or DDSketch.
+          </div>
+
+          <!-- 5d. Query Engine -->
+          <h3>5d. Query Engine &mdash; PromQL-Like Query Language</h3>
+          <p>The query engine translates human-readable queries into efficient scans over the TSDB. It supports time-range selection, mathematical operations, aggregation functions, and GROUP BY on tags.</p>
+
+          <div class="diagram-box">
+<pre>
+    QUERY LANGUAGE EXAMPLES (PromQL-style)
+    &equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;
+
+    BASIC QUERIES:
+    ────────────────────────────────────────────────────────
+
+    # Current CPU utilization for all hosts
+    cpu_utilization
+
+    # CPU utilization for a specific host
+    cpu_utilization{host="web-01"}
+
+    # CPU utilization in us-east-1 region
+    cpu_utilization{region="us-east-1"}
+
+    # Request rate (per-second) over last 5 minutes
+    rate(http_requests_total[5m])
+
+    # Error rate as percentage
+    rate(http_requests_total{status="5xx"}[5m])
+    /
+    rate(http_requests_total[5m])
+    * 100
+
+
+    AGGREGATION QUERIES:
+    ────────────────────────────────────────────────────────
+
+    # Average CPU across all hosts in a region
+    avg by (region) (cpu_utilization)
+
+    # 99th percentile request latency by service
+    histogram_quantile(0.99,
+      rate(http_request_duration_bucket[5m])
+    ) by (service)
+
+    # Total requests per second by endpoint
+    sum by (endpoint) (
+      rate(http_requests_total[5m])
+    )
+
+    # Top 10 hosts by memory usage
+    topk(10, memory_usage_bytes)
+
+
+    QUERY EXECUTION PLAN:
+    ────────────────────────────────────────────────────────
+
+    Query: avg by (region) (cpu_utilization{service="api"})
+    Time range: last 1 hour
+
+    1. RESOLVE: Find all time series matching
+       metric="cpu_utilization" AND tag service="api"
+       &rarr; Use inverted index: 500 matching series
+
+    2. FETCH: For each series, read compressed data
+       from the appropriate time block (last 1 hour)
+       &rarr; Read from in-memory HEAD block (recent data)
+
+    3. DECOMPRESS: Apply Gorilla decompression to get
+       raw (timestamp, value) pairs
+
+    4. AGGREGATE: Group by "region" tag, compute avg
+       &rarr; us-east-1: avg of 200 series = 52.3%
+       &rarr; us-west-2: avg of 150 series = 48.7%
+       &rarr; eu-west-1: avg of 150 series = 55.1%
+
+    5. RETURN: Time series result for each region
+</pre>
+          </div>
+
+          <!-- 5e. Alerting System -->
+          <h3>5e. Alerting System &mdash; From Rules to Notifications</h3>
+          <p>The alerting system continuously evaluates rules against metric data and sends notifications when conditions are met. It must be highly reliable &mdash; a missed alert can mean an outage goes undetected for hours.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    subgraph StateMachine["ALERT STATE MACHINE"]
+        INACTIVE["INACTIVE"] -->|"condition<br/>becomes true"| PENDING["PENDING"]
+        PENDING -->|"for duration<br/>elapsed"| FIRING["FIRING"]
+        INACTIVE -->|"condition<br/>becomes false"| INACTIVE
+        PENDING -->|"condition<br/>becomes false"| INACTIVE
+        FIRING -->|"condition<br/>becomes false"| RESOLVED["RESOLVED"]
+        RESOLVED --> INACTIVE
+    end
+
+    subgraph EvalLoop["EVALUATION LOOP (every 60s)"]
+        direction TB
+        E1["Execute PromQL expression<br/>against TSDB"] --> E2
+        E2["For each resulting<br/>time series"] --> E3{"State?"}
+        E3 -->|"INACTIVE +<br/>condition met"| E4["Transition to PENDING<br/>Record start time"]
+        E3 -->|"PENDING +<br/>condition met"| E5{"for duration<br/>elapsed?"}
+        E5 -->|"Yes"| E6["Transition to FIRING<br/>Send notification"]
+        E5 -->|"No"| E7["Stay PENDING"]
+        E3 -->|"condition<br/>NOT met"| E8["Transition to RESOLVED<br/>if was FIRING"]
+        E8 --> E9["Transition to INACTIVE<br/>if was PENDING"]
+    end
+          </div></div>
+
+          <h3>Alert Manager &mdash; Deduplication, Grouping, and Routing</h3>
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    IN["Incoming Alerts<br/>(from rule evaluator)"]
+    IN --> DEDUP
+    DEDUP["STEP 1: DEDUPLICATION<br/>Remove duplicate alerts<br/>(same alert name + labels)<br/>Dedup key = hash(alert_name + sorted_labels)"]
+    DEDUP --> GROUP
+    GROUP["STEP 2: GROUPING<br/>Group by: alertname, service<br/>Batch related alerts into<br/>single notifications<br/>group_wait: 30s<br/>group_interval: 5m"]
+    GROUP --> SIL
+    SIL["STEP 3: SILENCING & INHIBITION<br/>Silencing: Mute alerts during<br/>maintenance windows<br/>Inhibition: Suppress low-severity<br/>when high-severity is firing"]
+    SIL --> ROUTE
+    ROUTE["STEP 4: ROUTING<br/>Route to right team<br/>via right channel"]
+
+    ROUTE -->|"severity: critical<br/>repeat: 4h"| PD["PagerDuty<br/>oncall"]
+    ROUTE -->|"severity: warning<br/>repeat: 12h"| SL["Slack<br/>infra-alerts"]
+    ROUTE -->|"team: payments"| PDPD["PagerDuty<br/>payments oncall"]
+    ROUTE -->|"alertname: *Database*"| DBA["Slack<br/>DBA team"]
+          </div></div>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> The Alert Manager is often overlooked but is critical for a production system. Without it, a single incident (e.g., a network partition affecting 100 hosts) would generate hundreds of individual alerts, overwhelming the on-call engineer. Grouping, deduplication, and inhibition reduce alert noise by 10&ndash;100x. Mention the Alertmanager pattern by name &mdash; it shows you understand production operations, not just system design theory.
+          </div>
+
+          <!-- 5f. Visualization -->
+          <h3>5f. Visualization &mdash; Dashboard Service</h3>
+          <p>The dashboard service renders metrics data as charts, graphs, and tables. It must handle thousands of concurrent users viewing dashboards that auto-refresh every 10&ndash;30 seconds.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    subgraph Browser["BROWSER (Grafana-like UI)"]
+        DASH["Dashboard: Production Overview<br/>4 panels: CPU by Region, Error Rate,<br/>Request Rate, Memory Usage<br/>Auto-refresh: every 30 seconds"]
+    end
+
+    subgraph QS["QUERY SERVICE"]
+        RM["1. RESOLUTION MATCHING<br/>Panel is 1000px wide<br/>24h = 86,400 seconds<br/>Use 1-min aggregates<br/>Read 1,440 points instead of 8,640"]
+        CACH["2. QUERY RESULT CACHING<br/>Cache key: hash(query + time_range + step)<br/>TTL: 10-30s (matches refresh interval)<br/>Multiple users -> serve from cache"]
+        PRE["3. PRE-COMPUTED ROLLUPS<br/>Popular dashboards pre-computed<br/>Updated every minute by background job<br/>Zero query latency for common views"]
+    end
+
+    DASH -->|"HTTP requests<br/>every 30s"| RM
+    RM --> CACH
+    CACH --> PRE
+          </div></div>
+
+          <div class="info-box note">
+            <strong>Resolution matching</strong> is a subtle but important optimization. A dashboard panel that is 1,000 pixels wide can display at most 1,000 data points. If the time range is 24 hours, there is no visual benefit to fetching 8,640 raw data points (one per 10 seconds) &mdash; 1,440 one-minute aggregates look identical on screen but require 6x less data transfer and TSDB I/O. The query engine automatically selects the coarsest resolution that still provides more points than pixels, ensuring fast rendering without visible quality loss.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- TRADE-OFFS -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="tradeoffs"></span>
+        <section class="section">
+          <h2>6. Trade-offs</h2>
+
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Decision</th>
+                  <th>Option A</th>
+                  <th>Option B</th>
+                  <th>Recommendation</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>Pull vs. Push Collection</strong></td>
+                  <td><strong>Pull (Prometheus):</strong> Server scrapes targets. Built-in health detection (failed scrape = target down). No agent required. But limited to ~100K targets per server and requires targets to be network-reachable.</td>
+                  <td><strong>Push (Datadog/StatsD):</strong> Agents push to collection API. Scales to millions of hosts via stateless load-balanced API tier. Works behind firewalls/NATs. But requires agent on every host and can&rsquo;t easily detect silent host failures.</td>
+                  <td>Use <strong>push-based</strong> for large-scale infrastructure (&gt;10K hosts). The stateless collection tier scales horizontally, and agents can buffer during network outages. Use pull for smaller deployments or within a single Kubernetes cluster where Prometheus excels.</td>
+                </tr>
+                <tr>
+                  <td><strong>TSDB vs. Regular Database</strong></td>
+                  <td><strong>Purpose-built TSDB:</strong> Gorilla compression (12x), time-partitioned blocks, built-in downsampling, optimized for append-only writes and time-range scans. But specialized &mdash; limited ecosystem, operational learning curve.</td>
+                  <td><strong>General-purpose DB (PostgreSQL + TimescaleDB):</strong> Familiar SQL interface, rich ecosystem, ACID transactions. But 140x more storage per point, lower write throughput, no built-in compression for time-series patterns.</td>
+                  <td>Use a <strong>purpose-built TSDB</strong> at this scale (10M points/sec). The 140x storage difference alone makes a general-purpose DB impractical (57 TB vs. 8 PB). TimescaleDB is a reasonable middle ground for smaller deployments (&lt;1M points/sec) where SQL familiarity matters.</td>
+                </tr>
+                <tr>
+                  <td><strong>Retention vs. Storage Cost</strong></td>
+                  <td><strong>Long retention, high resolution:</strong> Keep raw 10-second data for months. Enables detailed historical analysis. But storage grows linearly &mdash; 50 TB per week of raw data at this scale.</td>
+                  <td><strong>Aggressive downsampling:</strong> Raw data for 7 days, 1-min for 30 days, 1-hr for 1 year. 99.8% storage reduction. But loses fine-grained detail for historical queries &mdash; can&rsquo;t see 10-second spikes from 2 months ago.</td>
+                  <td>Use <strong>aggressive downsampling</strong> as the default. Most historical queries (&ldquo;what was CPU last month?&rdquo;) don&rsquo;t need 10-second resolution. For critical metrics where detail matters, allow per-metric retention overrides (e.g., keep raw latency data for 30 days for SLO tracking).</td>
+                </tr>
+                <tr>
+                  <td><strong>Alerting Accuracy vs. Noise</strong></td>
+                  <td><strong>Sensitive alerts (low thresholds, short &ldquo;for&rdquo; duration):</strong> Catches issues quickly. But generates many false positives from transient spikes, causing alert fatigue. On-call engineers start ignoring alerts.</td>
+                  <td><strong>Conservative alerts (higher thresholds, longer &ldquo;for&rdquo; duration):</strong> Fewer false positives, less noise. But may miss real issues or detect them late. A 5-minute &ldquo;for&rdquo; duration means 5 minutes of impact before the alert fires.</td>
+                  <td>Start <strong>conservative</strong> and tune down. Alert fatigue is more dangerous than slightly delayed detection &mdash; if engineers ignore alerts, the system is useless. Use the &ldquo;for&rdquo; duration (e.g., 5 minutes) to filter transient spikes. Combine with anomaly detection for metrics where static thresholds are insufficient (e.g., request rate varies by time of day).</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> When discussing trade-offs, connect them to real-world consequences. For example: &ldquo;Alert fatigue is one of the biggest operational risks. If we set CPU threshold at 80% with a 1-minute &lsquo;for&rsquo; duration, we might get 50 alerts per day from normal traffic spikes. Engineers start ignoring alerts, and when a real incident happens, the alert is buried in noise. This is why the &lsquo;for&rsquo; duration, grouping, and inhibition in the Alert Manager are not nice-to-haves &mdash; they&rsquo;re essential for the system to be useful.&rdquo;
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- REVISION CHECKLIST -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="revision"></span>
+        <section class="section">
+          <h2>7. Revision Checklist</h2>
+          <p>Use this checklist to verify you can recall the key concepts before your interview.</p>
+
+          <div class="checklist">
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Architecture overview:</strong> Agents &rarr; Kafka (buffering) &rarr; Stream Processors &rarr; TSDB (storage) &rarr; Query Service &rarr; Dashboards &amp; Alerts. Each stage is independently scalable. Kafka decouples collection from storage, absorbing bursts and preventing backpressure on agents.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Scale numbers:</strong> 100K servers &times; 1,000 metrics &divide; 10s = 10M data points/sec. ~100 bytes/point uncompressed = 1 GB/sec. With Gorilla compression (12x): ~83 MB/sec. Downsampling reduces 1-year storage from 31 PB to 57 TB (99.8% reduction). This is a write-heavy, read-light workload.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Time-series data model:</strong> Each point = (metric_name, tags, timestamp, value). A unique time series = unique combination of metric_name + tags. Metric types: gauge (up/down value), counter (monotonically increasing), histogram (distribution buckets), summary (pre-computed quantiles).</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Why TSDBs, not regular DBs:</strong> Regular DBs use ~200 bytes/point (row overhead, B-tree indexes, MVCC). TSDBs use ~1.4 bytes/point (Gorilla compression). 140x storage difference. TSDBs are optimized for append-only writes, time-range scans, and automatic retention management (drop entire time blocks vs. expensive DELETE + VACUUM).</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Gorilla compression:</strong> Timestamps: delta-of-delta encoding &mdash; regular intervals produce delta-of-delta = 0, encoded as a single bit (64x compression). Values: XOR of consecutive floats &mdash; similar values produce XOR with mostly zeros, encode only non-zero bits (4&ndash;8x compression). Overall: 16 bytes/point &rarr; ~1.37 bytes/point (12x).</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Pull vs. push collection:</strong> Pull (Prometheus): server scrapes /metrics endpoints, built-in health detection, limited to ~100K targets. Push (Datadog): agents push to stateless API, scales to millions, works behind NAT. Use push for large-scale; pull for smaller/Kubernetes deployments. Hybrid is common in practice.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Downsampling:</strong> Raw 10s data kept 7 days, 1-min aggregates for 30 days, 1-hr aggregates for 1 year. Store min/max/sum/count (not just avg) to preserve correctness. Query engine auto-selects resolution based on time range. Reduces storage by 99.8% and makes long-range queries fast.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Alerting pipeline:</strong> Rule evaluator executes PromQL every 60s. Alert states: inactive &rarr; pending &rarr; firing &rarr; resolved. The &ldquo;for&rdquo; duration prevents flapping. Alert Manager handles deduplication (same alert + labels), grouping (batch related alerts), silencing (maintenance windows), inhibition (suppress low-severity when high-severity fires), and routing (severity &rarr; PagerDuty/Slack/email).</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Dashboard optimizations:</strong> Resolution matching (use coarsest resolution that exceeds pixel count). Query result caching (TTL = refresh interval, dedup concurrent viewers). Pre-computed rollups for popular dashboards. These ensure sub-second rendering even for complex queries.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Trade-offs as dials:</strong> Pull vs. push (scale vs. simplicity). TSDB vs. regular DB (performance vs. familiarity). Retention vs. storage cost (detail vs. expense). Alert sensitivity vs. noise (fast detection vs. alert fatigue). Start conservative on alerts &mdash; alert fatigue is more dangerous than slightly delayed detection.</span>
+            </label>
+          </div>
+        </section>
+
+        <!-- Bottom nav -->
+        <div class="problem-nav">
+          <a href="message-queue.html"><span class="nav-label">Previous</span><span class="nav-title">Message Queue</span></a>
+          <a href="payment-system.html" class="next"><span class="nav-label">Next</span><span class="nav-title">Payment System</span></a>
+        </div>
+      </div>
+    </div>
+  </main>
+  <script src="../js/app.js"></script>
+</body>
+</html>

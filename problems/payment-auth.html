@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Design Payment Authorization System — HLD Interview Prep</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+  <nav class="top-nav">
+    <div class="top-nav-inner">
+      <a href="../index.html" class="nav-logo">
+        <div class="nav-logo-icon">SD</div>
+        <span>HLD Interview Prep</span>
+      </a>
+      <div class="nav-actions">
+        <div class="nav-breadcrumb">
+          <a href="../index.html">Home</a>
+          <span class="separator">/</span>
+          <span class="current">Payment Auth System</span>
+        </div>
+        <button class="theme-toggle" id="theme-toggle">&#x263E;</button>
+      </div>
+    </div>
+  </nav>
+  <div class="scroll-progress"></div>
+
+  <main class="main-content">
+    <div class="problem-page">
+      <aside class="sidebar">
+        <div class="sidebar-title">On This Page</div>
+        <ul class="toc-list">
+          <li><a href="#requirements">Requirements</a></li>
+          <li><a href="#estimation">Capacity Estimation</a></li>
+          <li><a href="#api-design">API Design</a></li>
+          <li><a href="#data-model">Data Model</a></li>
+          <li><a href="#high-level-design">High-Level Design</a></li>
+          <li><a href="#deep-dive">Deep Dive</a></li>
+          <li><a href="#tradeoffs">Trade-offs</a></li>
+          <li><a href="#revision">Revision Checklist</a></li>
+        </ul>
+        <div class="progress-bar"><div class="progress-fill" style="width: 0%"></div></div>
+      </aside>
+
+      <div class="problem-content">
+        <div class="problem-header">
+          <h1>Design a Payment Authorization System</h1>
+          <p class="problem-subtitle">Design a payment authorization system like Visa/Mastercard that processes credit/debit card transactions in real-time, handling authorization, settlement, fraud detection, and high availability at the scale of 100,000+ transactions per second.</p>
+          <div class="problem-meta-bar">
+            <span class="meta-badge difficulty-hard">Hard</span>
+            <span class="meta-badge">FinTech</span>
+            <span class="meta-badge">Asked at: Databricks, Stripe, Visa</span>
+          </div>
+        </div>
+
+        <!-- REQUIREMENTS -->
+        <span class="section-anchor" id="requirements"></span>
+        <section class="section">
+          <h2>1. Requirements</h2>
+
+          <h3>Functional Requirements</h3>
+          <ul class="content-list">
+            <li><strong>Card authorization</strong> — When a merchant submits a transaction, the system must approve or decline in real-time (&lt;500ms). It checks card validity, available balance, fraud signals, and velocity limits.</li>
+            <li><strong>Settlement</strong> — After authorization, funds are held until settlement (typically end of day) when money actually moves between banks. The system batches and reconciles transactions.</li>
+            <li><strong>Fraud detection</strong> — Real-time fraud scoring using ML models and rule engines to block suspicious transactions before authorization.</li>
+            <li><strong>Transaction history</strong> — Cardholders can view their transaction history with pending and posted transactions.</li>
+            <li><strong>Multi-currency</strong> — Support transactions in multiple currencies with real-time exchange rates and currency conversion.</li>
+          </ul>
+
+          <h3>Non-Functional Requirements</h3>
+          <ul class="content-list">
+            <li><strong>Ultra-low latency:</strong> Authorization decisions in under 500ms (p99). This is a hard SLA from card networks.</li>
+            <li><strong>High availability:</strong> 99.999% uptime (5 nines). Payment systems cannot go down — every minute of downtime = millions in lost transactions.</li>
+            <li><strong>Strong consistency:</strong> Account balances must be accurate. Double-charging or incorrect balance is unacceptable.</li>
+            <li><strong>Massive throughput:</strong> Handle 100,000+ transactions per second at peak (Black Friday, holiday shopping).</li>
+            <li><strong>Durability:</strong> No transaction can be lost. Every authorization must be persisted before responding.</li>
+          </ul>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> This is a Databricks specialty question. Focus on the real-time constraint — you have 500ms to make an irreversible decision. This drives every design choice: in-memory balance checks, geographically distributed data, and asynchronous settlement. Also emphasize that payments are fundamentally different from other systems — you cannot retry, you cannot lose data, and you must be strongly consistent.
+          </div>
+        </section>
+
+        <!-- ESTIMATION -->
+        <span class="section-anchor" id="estimation"></span>
+        <section class="section">
+          <h2>2. Capacity Estimation</h2>
+
+          <h3>Assumptions</h3>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr><th>Parameter</th><th>Value</th><th>Notes</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>Transactions per day</td><td>5 billion</td><td>Global card transactions</td></tr>
+                <tr><td>Peak TPS</td><td>100,000</td><td>10x average during peak events</td></tr>
+                <tr><td>Average transaction size</td><td>$50</td><td>Mix of small and large purchases</td></tr>
+                <tr><td>Authorization latency</td><td>&lt;500ms p99</td><td>Card network SLA</td></tr>
+                <tr><td>Data per transaction</td><td>~500 bytes</td><td>Card info, merchant, amount, metadata</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>Throughput &amp; Storage</h3>
+<pre><code>Peak throughput:
+  Average TPS       = 5B / 86,400 ≈ 58,000 TPS
+  Peak TPS (10x)    ≈ 580,000 TPS
+  
+Storage:
+  Per transaction   = ~500 bytes
+  Daily             = 5B × 500B = 2.5 TB/day
+  Yearly            = ~912 TB/year
+  7-year retention  = ~6.4 PB (regulatory requirement)
+
+Memory (hot account balances):
+  Active accounts   = ~500 million
+  Per account state = ~200 bytes
+  Total             = 500M × 200B = 100 GB (fits in-memory)</code></pre>
+
+          <div class="info-box note">
+            <strong>Key Insight:</strong> The critical realization is that account balance data for active accounts (500M × 200B = 100GB) fits entirely in memory across a few servers. This means we can serve authorization requests without touching disk — the key to hitting the 500ms SLA. The storage grows fast (6.4 PB over 7 years) but that's for historical transaction logs, not the hot path.
+          </div>
+        </section>
+
+        <!-- API DESIGN -->
+        <span class="section-anchor" id="api-design"></span>
+        <section class="section">
+          <h2>3. API Design</h2>
+
+          <div class="api-endpoint">
+            <div class="api-endpoint-header">
+              <span class="api-method post">POST</span>
+              <span class="api-path">/v1/transactions/authorize</span>
+            </div>
+            <div class="api-endpoint-body">
+              <p>Request authorization for a card transaction. Returns approval or decline with a reason code.</p>
+<pre><code>{
+  "card_token": "tok_7f3a9b2c1d4e",
+  "merchant_id": "mer_abc123",
+  "amount": 4999,
+  "currency": "USD",
+  "mcc": "5411",               // Merchant category code (grocery)
+  "terminal_id": "term_001",
+  "pos_entry_mode": "chip",
+  "idempotency_key": "req_uuid_abc123"
+}</code></pre>
+            </div>
+          </div>
+
+          <div class="api-endpoint">
+            <div class="api-endpoint-header">
+              <span class="api-method post">POST</span>
+              <span class="api-path">/v1/transactions/capture</span>
+            </div>
+            <div class="api-endpoint-body">
+              <p>Capture a previously authorized transaction. Called when the merchant ships goods or provides service.</p>
+<pre><code>{
+  "authorization_id": "auth_7f3a9b2c",
+  "amount": 4999,             // Can be partial capture
+  "idempotency_key": "req_uuid_def456"
+}</code></pre>
+            </div>
+          </div>
+
+          <div class="api-endpoint">
+            <div class="api-endpoint-header">
+              <span class="api-method post">POST</span>
+              <span class="api-path">/v1/transactions/settle</span>
+            </div>
+            <div class="api-endpoint-body">
+              <p>Batch settlement — called by the settlement service to finalize a batch of captured transactions. Moves funds between acquiring and issuing banks.</p>
+            </div>
+          </div>
+        </section>
+
+        <!-- DATA MODEL -->
+        <span class="section-anchor" id="data-model"></span>
+        <section class="section">
+          <h2>4. Data Model</h2>
+
+          <div class="diagram-box"><pre>
+┌─────────────────────────────────────────────────────────────────────┐
+│                        ACCOUNTS (PostgreSQL)                        │
+├──────────────┬──────────────────────────────────────────────────────┤
+│ account_id   │ UUID PK                                            │
+│ card_token   │ VARCHAR — tokenized card reference                 │
+│ balance      │ BIGINT — available balance in cents                │
+│ hold_balance │ BIGINT — held funds (authorized not settled)       │
+│ currency     │ CHAR(3) — ISO 4217 currency code                  │
+│ status       │ ENUM — active, frozen, closed                     │
+│ daily_limit  │ BIGINT — max daily spend                          │
+│ daily_spent  │ BIGINT — spent today                              │
+│ created_at   │ TIMESTAMP                                         │
+└──────────────┴──────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                     TRANSACTIONS (Cassandra)                        │
+├──────────────┬──────────────────────────────────────────────────────┤
+│ account_id   │ UUID — partition key                               │
+│ txn_id       │ UUID — clustering key (time-ordered)               │
+│ type         │ ENUM — auth, capture, settle, refund, chargeback   │
+│ amount       │ BIGINT — in cents                                  │
+│ currency     │ CHAR(3)                                            │
+│ merchant_id  │ VARCHAR                                            │
+│ status       │ ENUM — pending, approved, declined, settled        │
+│ decline_code │ VARCHAR — reason code if declined                  │
+│ fraud_score  │ FLOAT — ML fraud score (0.0-1.0)                  │
+│ created_at   │ TIMESTAMP                                         │
+└──────────────┴──────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                      LEDGER (Cassandra)                             │
+├──────────────┬──────────────────────────────────────────────────────┤
+│ account_id   │ UUID — partition key                               │
+│ entry_id     │ UUID — clustering key                              │
+│ txn_id       │ UUID — references transactions                     │
+│ entry_type   │ ENUM — debit, credit, hold, release               │
+│ amount       │ BIGINT                                             │
+│ balance_after│ BIGINT — snapshot after this entry                 │
+│ created_at   │ TIMESTAMP                                         │
+└──────────────┴──────────────────────────────────────────────────────┘
+          </pre></div>
+        </section>
+
+        <!-- HIGH-LEVEL DESIGN -->
+        <span class="section-anchor" id="high-level-design"></span>
+        <section class="section">
+          <h2>5. High-Level Design</h2>
+
+          <h3>Architecture Overview</h3>
+          <div class="mermaid-container">
+            <div class="mermaid-title">Payment Authorization Flow</div>
+            <div class="mermaid">
+graph TD
+    POS[POS Terminal / Online] -->|Card swipe / tap| ACQ[Acquiring Bank Gateway]
+    ACQ -->|ISO 8583 message| PAY[Payment Gateway]
+    PAY --> AUTH[Auth Service]
+    AUTH --> FRAUD[Fraud Engine]
+    AUTH --> BAL[Balance Service]
+    AUTH --> VLIM[Velocity Limiter]
+    BAL --> REDIS[Account Cache - Redis]
+    FRAUD --> ML[ML Fraud Model]
+    AUTH -->|Approve / Decline| PAY
+    PAY -->|Response| ACQ
+    ACQ -->|Response| POS
+    AUTH --> KAFKA[Kafka]
+    KAFKA --> SETTLE[Settlement Service]
+    KAFKA --> LEDGER[Ledger Service]
+    SETTLE --> BANK[Bank Network - ACH/SWIFT]
+            </div>
+          </div>
+
+          <h3>Authorization Flow</h3>
+          <div class="mermaid-container">
+            <div class="mermaid-title">Authorization Decision Flow</div>
+            <div class="mermaid">
+graph TD
+    REQ[Authorization Request] --> CARD{Card Valid?}
+    CARD -->|No| DECLINE1[Decline - Invalid Card]
+    CARD -->|Yes| FRAUD2{Fraud Score &lt; 0.7?}
+    FRAUD2 -->|No| DECLINE2[Decline - Fraud]
+    FRAUD2 -->|Yes| VLIM2{Velocity OK?}
+    VLIM2 -->|No| DECLINE3[Decline - Velocity]
+    VLIM2 -->|Yes| BAL2{Balance >= Amount?}
+    BAL2 -->|No| DECLINE4[Decline - Insufficient Funds]
+    BAL2 -->|Yes| HOLD[Place Hold on Balance]
+    HOLD --> APPROVE[Approve Transaction]
+            </div>
+          </div>
+
+          <div class="info-box note">
+            <strong>Why In-Memory Balance?</strong> The 500ms SLA means we cannot afford a disk read for every authorization. By keeping active account balances in Redis (100GB total), we can serve all authorization requests from memory. The balance is the most frequently updated and read data — it must be in the fastest storage layer. Writes (hold, settle) go through Redis first for speed, then asynchronously to PostgreSQL for durability.
+          </div>
+        </section>
+
+        <!-- DEEP DIVE -->
+        <span class="section-anchor" id="deep-dive"></span>
+        <section class="section">
+          <h2>6. Deep Dive</h2>
+
+          <h3>Strong Consistency for Balances</h3>
+          <p>The hardest problem in payment authorization is ensuring that two simultaneous transactions for the same account don't both see the same balance and both get approved (double-spend). We solve this with optimistic locking:</p>
+
+<pre><code>// Pseudocode for atomic balance check + hold
+function authorize(accountId, amount) {
+  // Redis WATCH ensures no concurrent modification
+  redis.WATCH(accountId)
+  balance = redis.HGET(accountId, "balance")
+  if (balance < amount) {
+    redis.UNWATCH()
+    return DECLINE_INSUFFICIENT_FUNDS
+  }
+  // Atomic: check balance AND place hold in one transaction
+  multi = redis.MULTI()
+  multi.HINCRBY(accountId, "balance", -amount)
+  multi.HINCRBY(accountId, "hold_balance", amount)
+  if (multi.EXEC() == null) {
+    // Another transaction modified the balance — retry
+    return RETRY
+  }
+  return APPROVE
+}</code></pre>
+
+          <h3>Fraud Detection Engine</h3>
+          <div class="mermaid-container">
+            <div class="mermaid-title">Fraud Detection Pipeline</div>
+            <div class="mermaid">
+graph LR
+    TXN[Transaction] --> RULES[Rule Engine]
+    TXN --> ML2[ML Model]
+    RULES --> SCORE[Score Aggregator]
+    ML2 --> SCORE
+    SCORE --> DECIDE{Score > 0.7?}
+    DECIDE -->|Yes| BLOCK[Block]
+    DECIDE -->|No| PASS[Allow]
+    SCORE --> KAFKA2[Kafka]
+    KAFKA2 --> TRAIN[Model Training Pipeline]
+            </div>
+          </div>
+
+          <h3>Settlement Pipeline</h3>
+          <p>Settlement is an asynchronous batch process that runs at end-of-day. It groups all captured transactions by merchant, calculates net amounts, and initiates fund transfers via ACH (US) or SEPA (EU).</p>
+
+          <div class="mermaid-container">
+            <div class="mermaid-title">Settlement Flow</div>
+            <div class="mermaid">
+graph TD
+    SCHED[Daily Settlement Trigger] --> BATCH[Batch Processor]
+    BATCH --> GROUP[Group by Merchant]
+    GROUP --> FEE[Calculate Fees]
+    FEE --> NET[Net Settlement Amounts]
+    NET --> ACH[Initiate ACH Transfer]
+    ACH --> RECON[Reconciliation]
+    RECON --> REPORT[Settlement Report]
+            </div>
+          </div>
+        </section>
+
+        <!-- TRADE-OFFS -->
+        <span class="section-anchor" id="tradeoffs"></span>
+        <section class="section">
+          <h2>7. Trade-offs</h2>
+
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr><th>Decision</th><th>Option A</th><th>Option B</th><th>Recommendation</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>Balance Storage</strong></td>
+                  <td><strong>Redis (in-memory):</strong> Sub-ms reads. Must handle replication for HA. Data loss risk (mitigated by write-ahead log).</td>
+                  <td><strong>PostgreSQL (disk):</strong> ACID guarantees. Too slow for p99 &lt;500ms at 100K TPS. Disk I/O is the bottleneck.</td>
+                  <td>Use <strong>Redis with synchronous replication</strong>. Keep balances in Redis for speed, but write to PostgreSQL async for durability. On Redis failure, replay from WAL to rebuild.</td>
+                </tr>
+                <tr>
+                  <td><strong>Fraud Detection</strong></td>
+                  <td><strong>Synchronous (in-path):</strong> Every transaction checked before approval. Higher latency but no false approvals.</td>
+                  <td><strong>Asynchronous (out-of-path):</strong> Transactions approved optimistically, fraud checked later. Faster but allows some fraudulent transactions.</td>
+                  <td>Use <strong>hybrid</strong>: fast rule-based checks synchronous (&lt;50ms), ML model async for complex analysis. Block if rule score exceeds threshold.</td>
+                </tr>
+                <tr>
+                  <td><strong>Idempotency</strong></td>
+                  <td><strong>Client-generated UUID:</strong> Simple. Requires client to track and retry with same ID.</td>
+                  <td><strong>Server-generated with dedup store:</strong> More reliable. Adds a Redis lookup per request.</td>
+                  <td>Use <strong>both</strong>: accept client idempotency keys, but also generate server-side transaction IDs. Store idempotency keys in Redis with 24h TTL for dedup.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- REVISION CHECKLIST -->
+        <span class="section-anchor" id="revision"></span>
+        <section class="section">
+          <h2>8. Revision Checklist</h2>
+          <p>Use this checklist to verify you can recall the key concepts before your interview.</p>
+
+          <div class="checklist">
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Authorization vs Settlement:</strong> Authorization is real-time (approve/decline, place hold). Settlement is async batch (actually move money). This two-phase approach allows instant decisions while ensuring money moves reliably.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>In-memory balance with optimistic locking:</strong> Keep active account balances in Redis for sub-ms reads. Use Redis WATCH/MULTI/EXEC for atomic check-and-hold. This prevents double-spend while hitting the 500ms SLA.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Fraud detection pipeline:</strong> Fast rules synchronous (velocity limits, geo-checks), ML model async for complex scoring. Block if rule score > threshold. Train model on labeled fraud data from Kafka.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>5 nines availability:</strong> Active-active across multiple data centers. Each DC has a full copy of account data. Use consensus (Raft) for cross-DC balance consistency. Failover in &lt;1 second.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Idempotency is critical:</strong> Network retries can cause duplicate transactions. Every request needs an idempotency key (client UUID). Server deduplicates by checking Redis before processing.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Scale numbers:</strong> 100K+ peak TPS, 500ms p99 latency, 6.4 PB storage over 7 years (regulatory), 100 GB hot balance data in memory, 99.999% availability.</span>
+            </label>
+          </div>
+        </section>
+
+        <div class="problem-nav">
+          <a href="payment-system.html"><span class="nav-label">Previous</span><span class="nav-title">Payment System</span></a>
+          <a href="collaborative-editor.html" class="next"><span class="nav-label">Next</span><span class="nav-title">Collaborative Editor</span></a>
+        </div>
+      </div>
+    </div>
+  </main>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script src="../js/app.js"></script>
+</body>
+</html>

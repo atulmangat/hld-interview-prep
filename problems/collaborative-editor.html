@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Design Collaborative Editor — HLD Interview Prep</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+  <nav class="top-nav">
+    <div class="top-nav-inner">
+      <a href="../index.html" class="nav-logo">
+        <div class="nav-logo-icon">SD</div>
+        <span>HLD Interview Prep</span>
+      </a>
+      <div class="nav-actions">
+        <div class="nav-breadcrumb">
+          <a href="../index.html">Home</a>
+          <span class="separator">/</span>
+          <span class="current">Collaborative Editor</span>
+        </div>
+        <button class="theme-toggle" id="theme-toggle">&#x263E;</button>
+      </div>
+    </div>
+  </nav>
+  <div class="scroll-progress"></div>
+
+  <main class="main-content">
+    <div class="problem-page">
+      <aside class="sidebar">
+        <div class="sidebar-title">On This Page</div>
+        <ul class="toc-list">
+          <li><a href="#requirements">Requirements</a></li>
+          <li><a href="#estimation">Capacity Estimation</a></li>
+          <li><a href="#api-design">API Design</a></li>
+          <li><a href="#data-model">Data Model</a></li>
+          <li><a href="#high-level-design">High-Level Design</a></li>
+          <li><a href="#deep-dive">Deep Dive</a></li>
+          <li><a href="#tradeoffs">Trade-offs</a></li>
+          <li><a href="#revision">Revision Checklist</a></li>
+        </ul>
+        <div class="progress-bar"><div class="progress-fill" style="width: 0%"></div></div>
+      </aside>
+
+      <div class="problem-content">
+        <div class="problem-header">
+          <h1>Design a Collaborative Editor</h1>
+          <p class="problem-subtitle">Design a real-time collaborative document editor like Google Docs or Figma where multiple users can simultaneously edit the same document with live cursors, conflict resolution, and offline support.</p>
+          <div class="problem-meta-bar">
+            <span class="meta-badge difficulty-hard">Hard</span>
+            <span class="meta-badge">Real-Time</span>
+            <span class="meta-badge">Asked at: Databricks, Google, Figma</span>
+          </div>
+        </div>
+
+        <span class="section-anchor" id="requirements"></span>
+        <section class="section">
+          <h2>1. Requirements</h2>
+
+          <h3>Functional Requirements</h3>
+          <ul class="content-list">
+            <li><strong>Real-time editing</strong> — Multiple users can edit the same document simultaneously. Changes from any user appear on all other users' screens within 200ms.</li>
+            <li><strong>Conflict resolution</strong> — When two users edit the same paragraph concurrently, changes are merged automatically without data loss using Operational Transformation (OT) or CRDT.</li>
+            <li><strong>Live cursors</strong> — Users can see other collaborators' cursor positions, selections, and typing indicators in real-time.</li>
+            <li><strong>Offline support</strong> — Users can edit while offline. Changes are queued locally and synced when connectivity is restored, with automatic conflict resolution.</li>
+            <li><strong>Version history</strong> — The system maintains a full edit history. Users can view any past version and restore it.</li>
+          </ul>
+
+          <h3>Non-Functional Requirements</h3>
+          <ul class="content-list">
+            <li><strong>Low latency:</strong> Edit operations propagated to all collaborators within 200ms (p95). Cursor updates within 100ms.</li>
+            <li><strong>Consistency:</strong> All users must eventually see the same document state (eventual consistency). The merge algorithm must be commutative and associative.</li>
+            <li><strong>Scalability:</strong> Support 100 concurrent editors per document, millions of documents, 50M daily active users.</li>
+            <li><strong>Durability:</strong> No edits can be lost. Every operation is persisted before acknowledgment.</li>
+          </ul>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> This is a favorite at Databricks because it tests understanding of distributed consensus, CRDTs, and real-time data pipelines — all core to Databricks' data platform. The key insight is that OT and CRDT are fundamentally about making operations commutative so order doesn't matter. This is the same principle behind Delta Lake's conflict resolution.
+          </div>
+        </section>
+
+        <span class="section-anchor" id="estimation"></span>
+        <section class="section">
+          <h2>2. Capacity Estimation</h2>
+
+          <h3>Assumptions</h3>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr><th>Parameter</th><th>Value</th><th>Notes</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>Daily Active Users</td><td>50 million</td><td>Similar to Google Docs scale</td></tr>
+                <tr><td>Concurrent editors per doc</td><td>~5 average, 100 peak</td><td>Most docs have 1-2 editors</td></tr>
+                <tr><td>Operations per user per minute</td><td>~30</td><td>Typing, formatting, cursor moves</td></tr>
+                <tr><td>Average document size</td><td>~10 KB</td><td>Text + formatting metadata</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>Throughput</h3>
+<pre><code>Operations:
+  Active concurrent users    = 50M × 5% online = 2.5M concurrent
+  Operations per second      = 2.5M × 30/60 = 1.25M ops/sec
+  Per operation payload      = ~200 bytes (operation + metadata)
+
+WebSocket connections:
+  Concurrent connections     = 2.5M
+  At ~50K per server         = 50 WebSocket servers
+
+Storage (operations log):
+  Daily operations           = 1.25M × 86,400 = 108B operations/day
+  Daily storage              = 108B × 200B = 21.6 TB/day</code></pre>
+        </section>
+
+        <span class="section-anchor" id="api-design"></span>
+        <section class="section">
+          <h2>3. API Design</h2>
+
+          <div class="api-endpoint">
+            <div class="api-endpoint-header">
+              <span class="api-method post">WS</span>
+              <span class="api-path">wss://docs.example.com/ws?doc_id={id}&amp;token={jwt}</span>
+            </div>
+            <div class="api-endpoint-body">
+              <p>Establish WebSocket connection for real-time collaboration. Events:</p>
+<pre><code>// Client sends edit operation
+{
+  "type": "operation",
+  "doc_id": "doc_abc123",
+  "op": {
+    "type": "insert",
+    "position": 142,
+    "content": "hello",
+    "version": 47         // Client's last known version
+  }
+}
+
+// Server broadcasts to all collaborators
+{
+  "type": "remote_operation",
+  "user_id": "user_456",
+  "op": { ... },
+  "version": 48,
+  "transformed": true     // OT applied
+}</code></pre>
+            </div>
+          </div>
+
+          <div class="api-endpoint">
+            <div class="api-endpoint-header">
+              <span class="api-method get">GET</span>
+              <span class="api-path">/v1/documents/{doc_id}/versions</span>
+            </div>
+            <div class="api-endpoint-body">
+              <p>List all saved versions of a document for version history.</p>
+            </div>
+          </div>
+        </section>
+
+        <span class="section-anchor" id="data-model"></span>
+        <section class="section">
+          <h2>4. Data Model</h2>
+
+          <div class="diagram-box"><pre>
+┌─────────────────────────────────────────────────────────────────────┐
+│                      DOCUMENTS (PostgreSQL)                         │
+├──────────────┬──────────────────────────────────────────────────────┤
+│ doc_id       │ UUID PK                                            │
+│ owner_id     │ UUID — document creator                            │
+│ title        │ VARCHAR                                            │
+│ content_hash │ VARCHAR — latest content hash                      │
+│ version      │ BIGINT — monotonic version counter                │
+│ created_at   │ TIMESTAMP                                         │
+│ updated_at   │ TIMESTAMP                                         │
+└──────────────┴──────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                    OPERATIONS (Cassandra)                           │
+├──────────────┬──────────────────────────────────────────────────────┤
+│ doc_id       │ UUID — partition key                               │
+│ version      │ BIGINT — clustering key (ordered)                  │
+│ user_id      │ UUID — who made the edit                           │
+│ op_type      │ ENUM — insert, delete, format                     │
+│ position     │ INT — character position                           │
+│ content      │ TEXT — inserted text (null for delete)             │
+│ attributes   │ MAP — formatting attributes                        │
+│ timestamp    │ TIMESTAMP                                         │
+└──────────────┴──────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                  SNAPSHOTS (S3 + PostgreSQL)                        │
+├──────────────┬──────────────────────────────────────────────────────┤
+│ doc_id       │ UUID                                               │
+│ version      │ BIGINT — snapshot at this version                  │
+│ s3_key       │ VARCHAR — path to snapshot in S3                   │
+│ content_hash │ VARCHAR — hash of snapshot content                 │
+│ created_at   │ TIMESTAMP                                         │
+└──────────────┴──────────────────────────────────────────────────────┘
+          </pre></div>
+        </section>
+
+        <span class="section-anchor" id="high-level-design"></span>
+        <section class="section">
+          <h2>5. High-Level Design</h2>
+
+          <h3>Architecture Overview</h3>
+          <div class="mermaid-container">
+            <div class="mermaid-title">Collaborative Editor Architecture</div>
+            <div class="mermaid">
+graph TD
+    U1[User A] -->|WebSocket| WS1[WS Server 1]
+    U2[User B] -->|WebSocket| WS2[WS Server 2]
+    U3[User C] -->|WebSocket| WS1
+    WS1 -->|Pub/Sub| REDIS[Redis Pub/Sub]
+    WS2 -->|| REDIS
+    REDIS -->|Broadcast| WS1
+    REDIS -->|Broadcast| WS2
+    WS1 --> OT[OT/CRDT Engine]
+    WS2 --> OT
+    OT --> CASSANDRA[Cassandra - Operations Log]
+    OT --> PG[PostgreSQL - Documents]
+    OT --> S3[S3 - Snapshots]
+            </div>
+          </div>
+
+          <h3>Operational Transformation (OT)</h3>
+          <div class="mermaid-container">
+            <div class="mermaid-title">OT Convergence Example</div>
+            <div class="mermaid">
+graph LR
+    S0[State: "Hello"] --> O1[User A: Insert '!' at 5]
+    S0 --> O2[User B: Insert ' World' at 5]
+    O1 --> T1[Transform O2 against O1]
+    O2 --> T2[Transform O1 against O2]
+    T1 --> S1[State: "Hello World!"]
+    T2 --> S1
+            </div>
+          </div>
+
+          <div class="info-box note">
+            <strong>Why OT over CRDT?</strong> OT is simpler for text editing because it works with position-based operations (insert at position X, delete at position Y). CRDT requires unique IDs for every character, which is more complex but has better offline support. Most production systems (Google Docs) use OT. Figma uses CRDT for its design objects.
+          </div>
+        </section>
+
+        <span class="section-anchor" id="deep-dive"></span>
+        <section class="section">
+          <h2>6. Deep Dive</h2>
+
+          <h3>WebSocket Connection Management</h3>
+          <p>Each document has a "room" on a specific WebSocket server. When a user opens a document, they connect to the server hosting that room. If the document has no active room, any server can host it.</p>
+
+          <div class="mermaid-container">
+            <div class="mermaid-title">Connection Routing</div>
+            <div class="mermaid">
+graph TD
+    CLIENT[Client] --> LB[Load Balancer]
+    LB --> WS1[WS Server 1 - Room: doc_A]
+    LB --> WS2[WS Server 2 - Room: doc_B]
+    LB --> WS3[WS Server 3 - Room: doc_C]
+    WS1 --> REGISTRY[Room Registry - Redis]
+    WS2 --> REGISTRY
+    WS3 --> REGISTRY
+            </div>
+          </div>
+
+          <h3>Offline Sync</h3>
+          <p>When a user goes offline, edits are stored in an IndexedDB queue. On reconnection, the client sends the queued operations with the last known version. The server transforms each operation against all intervening operations and broadcasts the result.</p>
+
+<pre><code>// Client-side offline queue
+class OfflineQueue {
+  constructor() {
+    this.queue = [];          // Pending operations
+    this.lastVersion = 0;     // Last synced version
+  }
+  
+  addOperation(op) {
+    op.version = this.lastVersion;
+    this.queue.push(op);
+    this.saveToIndexedDB();
+  }
+  
+  async sync() {
+    const response = await fetch('/sync', {
+      method: 'POST',
+      body: JSON.stringify({
+        doc_id: this.docId,
+        from_version: this.lastVersion,
+        operations: this.queue
+      })
+    });
+    // Server returns transformed ops + missed ops
+    const { applied, missed } = await response.json();
+    this.queue = [];
+    this.applyMissed(missed);
+  }
+}</code></pre>
+        </section>
+
+        <span class="section-anchor" id="tradeoffs"></span>
+        <section class="section">
+          <h2>7. Trade-offs</h2>
+
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr><th>Decision</th><th>Option A</th><th>Option B</th><th>Recommendation</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>OT vs CRDT</strong></td>
+                  <td><strong>OT:</strong> Position-based. Simpler for text. Requires central server for transformation. Google Docs uses this.</td>
+                  <td><strong>CRDT:</strong> ID-based. Better offline support. No central server needed. More memory overhead. Figma uses this.</td>
+                  <td>Use <strong>OT for text</strong> (simpler, proven at Google Docs scale). Consider CRDT for non-text elements (drawings, annotations).</td>
+                </tr>
+                <tr>
+                  <td><strong>Snapshot Strategy</strong></td>
+                  <td><strong>Periodic snapshots:</strong> Save full document every N operations. Faster reads but more storage.</td>
+                  <td><strong>Log-only:</strong> Store all operations, replay to get current state. Slower reads, less storage.</td>
+                  <td>Use <strong>snapshot + log</strong>: snapshot every 1000 operations. Load snapshot, then replay only recent operations. Balance read speed vs storage.</td>
+                </tr>
+                <tr>
+                  <td><strong>Cursor Updates</strong></td>
+                  <td><strong>Per-keystroke:</strong> Send cursor position on every keystroke. Most accurate but high bandwidth.</td>
+                  <td><strong>Throttled:</strong> Send cursor position every 100ms. Lower bandwidth, slightly stale.</td>
+                  <td>Use <strong>100ms throttle</strong> for cursor updates. Users won't notice the difference, but bandwidth drops 10x.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <span class="section-anchor" id="revision"></span>
+        <section class="section">
+          <h2>8. Revision Checklist</h2>
+          <p>Use this checklist to verify you can recall the key concepts before your interview.</p>
+
+          <div class="checklist">
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>OT transforms operations</strong> so order doesn't matter. If A inserts "!" at pos 5 and B inserts " World" at pos 5, OT transforms B's operation to insert at pos 11 (after A's "!"). Both converge to "Hello World!"</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>WebSocket for real-time:</strong> Persistent bidirectional connection between client and server. Each document is a "room" on a WS server. Redis Pub/Sub broadcasts operations between WS servers.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Version counter:</strong> Every document has a monotonic version number. Each operation increments it. Clients send their last known version with each operation, allowing the server to transform against missed operations.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Offline sync:</strong> Edits stored in IndexedDB while offline. On reconnect, send queued operations + last version. Server transforms each against intervening operations and broadcasts. All clients converge.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Snapshots for performance:</strong> Every 1000 operations, save full document to S3. New clients load snapshot + replay only recent ops. Without snapshots, a doc with 100K ops would require replaying all 100K.</span>
+            </label>
+          </div>
+        </section>
+
+        <div class="problem-nav">
+          <a href="payment-auth.html"><span class="nav-label">Previous</span><span class="nav-title">Payment Auth System</span></a>
+          <a href="workflow-orchestration.html" class="next"><span class="nav-label">Next</span><span class="nav-title">Workflow Orchestration</span></a>
+        </div>
+      </div>
+    </div>
+  </main>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script src="../js/app.js"></script>
+</body>
+</html>

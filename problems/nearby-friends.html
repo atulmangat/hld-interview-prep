@@ -1,0 +1,960 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Design Nearby Friends — HLD Interview Prep</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+  <nav class="top-nav">
+    <div class="top-nav-inner">
+      <a href="../index.html" class="nav-logo">
+        <div class="nav-logo-icon">SD</div>
+        <span>HLD Interview Prep</span>
+      </a>
+      <div class="nav-actions">
+        <div class="nav-breadcrumb">
+          <a href="../index.html">Home</a>
+          <span class="separator">/</span>
+          <span class="current">Nearby Friends</span>
+        </div>
+        <button class="theme-toggle" id="theme-toggle">&#x263E;</button>
+      </div>
+    </div>
+  </nav>
+  <div class="scroll-progress"></div>
+
+  <main class="main-content">
+    <div class="problem-page">
+      <!-- Sidebar TOC -->
+      <aside class="sidebar">
+        <div class="sidebar-title">On This Page</div>
+        <ul class="toc-list">
+          <li><a href="#requirements">Requirements</a></li>
+          <li><a href="#estimation">Capacity Estimation</a></li>
+          <li><a href="#high-level-design">High-Level Design</a></li>
+          <li><a href="#deep-dive">Deep Dive</a></li>
+          <li><a href="#tradeoffs">Trade-offs</a></li>
+          <li><a href="#revision">Revision Checklist</a></li>
+        </ul>
+        <div class="progress-bar"><div class="progress-fill" style="width: 0%"></div></div>
+      </aside>
+
+      <div class="problem-content">
+        <!-- Header -->
+        <div class="problem-header">
+          <h1>Design Nearby Friends</h1>
+          <p class="problem-subtitle">Design a real-time system that shows users which of their friends are nearby (within 5 miles) &mdash; updating locations every 30 seconds, computing proximity efficiently across millions of concurrent users, managing WebSocket connections at scale, and respecting user privacy through opt-in controls.</p>
+          <div class="problem-meta-bar">
+            <span class="meta-badge difficulty-medium">Medium</span>
+            <span class="meta-badge">Social &amp; Feed</span>
+            <span class="meta-badge">Asked at: Meta, Uber, Lyft</span>
+          </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- REQUIREMENTS -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="requirements"></span>
+        <section class="section">
+          <h2>1. Requirements</h2>
+
+          <h3>Functional Requirements</h3>
+          <ul class="content-list">
+            <li><strong>See nearby friends in real-time</strong> &mdash; Users should be able to see a list of friends who are currently within a 5-mile (8 km) radius. The list updates in real-time as friends move closer or farther away. Only friends who have opted in to location sharing are visible.</li>
+            <li><strong>Update location every 30 seconds</strong> &mdash; The mobile client sends the user&rsquo;s GPS coordinates to the server every 30 seconds. The server uses this to recompute which friends are nearby and pushes updates to affected users.</li>
+            <li><strong>Show distance and last update time</strong> &mdash; For each nearby friend, display the approximate distance (e.g., &ldquo;0.5 miles away&rdquo;) and the time of their last location update (e.g., &ldquo;2 minutes ago&rdquo;). Distance does not need to be precise &mdash; rounding to the nearest 0.1 mile is sufficient.</li>
+            <li><strong>Respect privacy (opt-in)</strong> &mdash; Location sharing is strictly opt-in. Users must explicitly enable the &ldquo;Nearby Friends&rdquo; feature. They can disable it at any time, which immediately stops sharing their location and removes them from all friends&rsquo; nearby lists. Users can also choose to share location only with specific friend lists.</li>
+          </ul>
+
+          <h3>Non-Functional Requirements</h3>
+          <ul class="content-list">
+            <li><strong>Scale:</strong> 100 million DAU, with 10% concurrent at peak = 10 million concurrent users actively sharing their location. The system must handle this load without degradation.</li>
+            <li><strong>Low latency:</strong> When a user&rsquo;s location changes, their nearby friends should see the update within 500 ms. This requires a push-based architecture (not polling) and efficient proximity computation.</li>
+            <li><strong>Location update frequency:</strong> Each user sends a location update every 30 seconds. At 10M concurrent users, this means 333K location updates per second that must be ingested, stored, and propagated.</li>
+            <li><strong>Availability:</strong> The system should be highly available. A brief delay in location updates is acceptable (soft real-time), but the system should not go down entirely. Eventual consistency is acceptable &mdash; a friend&rsquo;s location being 30&ndash;60 seconds stale is fine.</li>
+          </ul>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> Start by clarifying the problem scope: &ldquo;Are we building this for a social network like Facebook where users have a friends list, or for a ride-sharing app like Uber where we need to find nearby strangers (drivers)?&rdquo; The friends-based model is fundamentally different &mdash; we only need to check proximity against a user&rsquo;s friend list (hundreds of people), not against all users (millions). This dramatically simplifies the problem. Also ask: &ldquo;What is the radius? Is 5 miles fixed or configurable?&rdquo; and &ldquo;Do we need to show friends on a map, or just a list with distances?&rdquo;
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- ESTIMATION -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="estimation"></span>
+        <section class="section">
+          <h2>2. Capacity Estimation</h2>
+
+          <h3>Assumptions</h3>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Parameter</th>
+                  <th>Value</th>
+                  <th>Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Daily Active Users (DAU)</td>
+                  <td>100 million</td>
+                  <td>Large social network scale</td>
+                </tr>
+                <tr>
+                  <td>Concurrent users (10% of DAU)</td>
+                  <td>10 million</td>
+                  <td>Users with feature enabled and app open</td>
+                </tr>
+                <tr>
+                  <td>Location update interval</td>
+                  <td>30 seconds</td>
+                  <td>Client sends GPS coordinates every 30s</td>
+                </tr>
+                <tr>
+                  <td>Average friends per user</td>
+                  <td>400</td>
+                  <td>Typical social network friend count</td>
+                </tr>
+                <tr>
+                  <td>Friends with feature enabled (online)</td>
+                  <td>10% = 40 friends</td>
+                  <td>Only a fraction opt in and are concurrent</td>
+                </tr>
+                <tr>
+                  <td>Nearby radius</td>
+                  <td>5 miles (8 km)</td>
+                  <td>Configurable per user</td>
+                </tr>
+                <tr>
+                  <td>Location update payload</td>
+                  <td>32 bytes</td>
+                  <td>user_id (8B) + lat (8B) + lng (8B) + timestamp (8B)</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>Throughput Calculation</h3>
+<pre><code>Location updates per second:
+  10M concurrent users / 30 sec update interval
+  = 333,333 updates/sec
+  &asymp; 333K updates/sec
+
+Data ingestion rate:
+  333K updates/sec &times; 32 bytes/update
+  = 10.67 MB/sec
+  &asymp; 10 MB/sec (very manageable)
+
+Nearby friend checks per update:
+  Each location update triggers proximity checks
+  against the user's online friends.
+
+  333K updates/sec &times; 40 online friends/user
+  = 13.3M proximity checks/sec
+
+  Each check: compute distance between two lat/lng pairs
+  (Haversine formula or simplified Euclidean approximation)
+  = ~1 microsecond per check
+
+  Total CPU for proximity: 13.3M &times; 1 &mu;s = 13.3 seconds of CPU/sec
+  = ~14 CPU cores dedicated to distance computation</code></pre>
+
+          <h3>WebSocket Connection Estimate</h3>
+<pre><code>WebSocket connections:
+  10M concurrent users = 10M persistent WebSocket connections
+
+  Each WebSocket connection uses ~10 KB of memory
+  (TCP buffers, connection state, user metadata)
+
+  Total memory: 10M &times; 10 KB = 100 GB
+
+  Single server capacity: ~100K WebSocket connections
+  (limited by file descriptors, memory, and CPU)
+
+  WebSocket servers needed: 10M / 100K = 100 servers
+
+Push messages per second:
+  When a user's location updates, we push to nearby friends.
+  Assume 5% of friends are actually nearby (within 5 miles):
+  333K updates/sec &times; 40 friends &times; 5% nearby = 666K pushes/sec
+
+  Each push message: ~50 bytes (friend_id, distance, timestamp)
+  Push bandwidth: 666K &times; 50B = 33 MB/sec outbound</code></pre>
+
+          <div class="info-box note">
+            <strong>Key Insight:</strong> The numbers reveal that this is primarily a <strong>fan-out problem</strong>, not a storage problem. The data volume is tiny (10 MB/sec of location updates), but each update fans out to 40 friends for proximity checks, generating 13.3M distance computations per second. The critical challenge is efficiently determining which friends are nearby without doing a brute-force check against all 10M users. Since we only check against a user&rsquo;s friend list (not all users), the problem is tractable &mdash; 40 distance computations per update is trivial. The real engineering challenge is the WebSocket infrastructure: maintaining 10M persistent connections and routing 666K push messages/sec to the correct servers.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- HIGH-LEVEL DESIGN -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="high-level-design"></span>
+        <section class="section">
+          <h2>3. High-Level Design</h2>
+
+          <p>The system has two main flows: (1) ingesting location updates from users and caching them, and (2) computing which friends are nearby and pushing updates to them in real-time. We use WebSocket connections for bidirectional communication and Redis for both location caching and pub/sub message routing.</p>
+
+          <h3>System Architecture</h3>
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    subgraph MobileClients[Mobile Clients]
+        A[Mobile Client A]
+        B[Mobile Client B]
+        C[Mobile Client C]
+    end
+
+    LB[Load Balancer L4/L7<br/>Sticky sessions by user_id]
+
+    subgraph WSServers[WebSocket Servers]
+        WS1[WebSocket Server 1<br/>Location updates<br/>Push to clients]
+        WS2[WebSocket Server 2<br/>Location updates<br/>Push to clients]
+        WSN[WebSocket Server N<br/>Location updates<br/>Push to clients]
+    end
+
+    subgraph RedisCluster[Redis Cluster]
+        LocationCache[Location Cache<br/>Key: user:{id}:location<br/>TTL: 60s]
+        PubSub[Pub/Sub Channels<br/>Channel per user: user:{id}:location]
+    end
+
+    FriendSvc[Friend Service<br/>Get friend list]
+    LocationHistory[Location History DB<br/>Analytics]
+
+    A -->|WebSocket| LB
+    B -->|WebSocket| LB
+    C -->|WebSocket| LB
+
+    LB --> WS1
+    LB --> WS2
+    LB --> WSN
+
+    WS1 -->|Cache + Subscribe| RedisCluster
+    WS2 -->|Cache + Subscribe| RedisCluster
+    WSN -->|Cache + Subscribe| RedisCluster
+
+    RedisCluster --> FriendSvc
+    RedisCluster --> LocationHistory
+          </div></div>
+
+          <h3>Two Architectural Approaches</h3>
+          <p>There are two main ways to determine which friends are nearby. Each has different trade-offs for our scale.</p>
+
+          <div class="comparison-grid">
+            <div class="comparison-card">
+              <h4>Approach A: Pub/Sub per User</h4>
+<pre><code>Each user has a dedicated pub/sub channel.
+When User A opts in, their WebSocket server
+subscribes to the channels of all of A's
+online friends.
+
+When Friend B sends a location update:
+1. Update B's location in Redis cache
+2. Publish B's new location to B's channel
+3. A's WebSocket server receives the update
+   (because it subscribed to B's channel)
+4. Compute distance(A, B)
+5. If distance &lt; 5 miles, push to A's client
+
+Pros:
+• Simple mental model
+• No polling — pure event-driven
+• Only computes distance when a friend
+  actually moves
+
+Cons:
+• Each user subscribes to ~40 channels
+• 10M users &times; 40 channels = 400M subscriptions
+• Redis Pub/Sub memory overhead is significant
+• Channel management when friends come
+  online/offline adds complexity</code></pre>
+            </div>
+            <div class="comparison-card">
+              <h4>Approach B: Pub/Sub per Geohash</h4>
+<pre><code>Divide the world into geohash grid cells.
+Each cell has a pub/sub channel.
+
+When User A opts in, their WebSocket server
+subscribes to A's geohash channel + 8
+neighboring channels (9 total).
+
+When Friend B sends a location update:
+1. Update B's location in Redis cache
+2. Publish B's update to B's geohash channel
+3. All users in the same/neighboring cells
+   receive the update
+4. Filter: is B in my friend list?
+5. If yes, compute distance(A, B)
+6. If distance &lt; 5 miles, push to A's client
+
+Pros:
+• Far fewer channels (millions of cells vs
+  billions of user pairs)
+• Natural spatial grouping
+• Efficient for dense areas
+
+Cons:
+• Receives updates from non-friends (noise)
+• Must filter by friend list on each update
+• Channel switching when user moves to a
+  new geohash cell</code></pre>
+            </div>
+          </div>
+
+          <div class="info-box important">
+            <strong>Recommended: Approach A (Pub/Sub per User).</strong> For a friends-based system, Approach A is simpler and more efficient. The key insight is that we only care about a user&rsquo;s friends (40 online friends on average), not all nearby users. With Approach B (geohash channels), a user in a dense area like Manhattan would receive thousands of location updates from strangers, only to discard 99% of them after the friend-list filter. Approach A sends zero wasted messages &mdash; every update received is from a friend. The 400M subscription count is manageable with a Redis cluster. If you were building &ldquo;find nearby strangers&rdquo; (like Uber finding drivers), Approach B would be the right choice.
+          </div>
+
+          <h3>Location Update Flow (Approach A)</h3>
+          <div class="flow-container">
+            <div class="flow-box">Client sends GPS (lat, lng) via WebSocket</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">WebSocket server updates Redis location cache</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">Publish location to user&rsquo;s Pub/Sub channel</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Friends&rsquo; WS servers receive update (subscribed)</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">Compute distance for each subscribing friend</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">If &lt; 5 miles, push update to friend&rsquo;s client</div>
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- DEEP DIVE -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="deep-dive"></span>
+        <section class="section">
+          <h2>4. Deep Dive</h2>
+
+          <!-- 4a. Geohash -->
+          <h3>4a. Geohash &mdash; Spatial Indexing for Location Data</h3>
+          <p>A geohash encodes a latitude/longitude pair into a short alphanumeric string. Points that are geographically close share a common prefix. This property makes geohashes invaluable for spatial queries, even though we use Pub/Sub per user for the primary flow &mdash; geohashes are still useful for the initial &ldquo;bootstrap&rdquo; query (finding which friends are nearby when a user first opens the app).</p>
+
+          <div class="diagram-box">
+<pre>
+    HOW GEOHASH WORKS
+    &equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;
+
+    Geohash recursively subdivides the Earth's surface into
+    a grid of cells. Each additional character in the geohash
+    string narrows the cell to a smaller area.
+
+    ENCODING EXAMPLE: (37.7749, -122.4194) &rarr; "9q8yyk"
+    ────────────────────────────────────────────────────────
+
+    Step 1: Divide world into 32 cells (base-32 encoding)
+            Longitude range [-180, 180] &rarr; binary bits
+            Latitude range [-90, 90] &rarr; binary bits
+            Interleave bits: lon, lat, lon, lat, ...
+
+    Step 2: Convert binary to base-32 character
+            Each 5 bits &rarr; one character (0-9, a-z minus a,i,l,o)
+
+    Step 3: More characters = higher precision
+
+    ┌──────────────────────────────────────────────────────┐
+    │  GEOHASH PRECISION LEVELS                            │
+    │                                                      │
+    │  Length │ Cell Width  │ Cell Height │ Area            │
+    │  ──────┼─────────────┼─────────────┼──────────────── │
+    │    1   │ 5,000 km    │ 5,000 km    │ ~25,000,000 km&sup2;│
+    │    2   │ 1,250 km    │ 625 km      │ ~781,000 km&sup2;   │
+    │    3   │ 156 km      │ 156 km      │ ~24,000 km&sup2;    │
+    │    4   │ 39.1 km     │ 19.5 km     │ ~763 km&sup2;       │
+    │    5   │ 4.9 km      │ 4.9 km      │ ~24 km&sup2;        │
+    │    6   │ 1.2 km      │ 0.61 km     │ ~0.73 km&sup2;      │
+    │    7   │ 153 m       │ 153 m       │ ~0.023 km&sup2;     │
+    │    8   │ 38.2 m      │ 19.1 m      │ ~730 m&sup2;        │
+    │                                                      │
+    │  For "nearby friends within 5 miles (8 km)":         │
+    │  Use geohash length 4 (39 km cells) or 5 (4.9 km)   │
+    │                                                      │
+    │  Length 4: cells are larger than our radius           │
+    │    &rarr; fewer cells to check, but more false positives │
+    │  Length 5: cells closely match our 8 km radius        │
+    │    &rarr; good balance of precision and coverage         │
+    └──────────────────────────────────────────────────────┘
+
+
+    THE NEIGHBORING GEOHASH PROBLEM
+    ────────────────────────────────────────────────────────
+
+    A user near the EDGE of a geohash cell might have
+    friends in the ADJACENT cell who are within 5 miles
+    but have a completely different geohash prefix.
+
+    ┌───────────┬───────────┐
+    │           │           │
+    │  9q8yy    │  9q8yz    │
+    │           │           │
+    │       A ● │ ● B       │  A and B are 0.5 miles apart
+    │           │           │  but in different geohash cells!
+    │           │           │
+    └───────────┴───────────┘
+
+    SOLUTION: Always check the 8 neighboring cells too.
+
+    ┌───────────┬───────────┬───────────┐
+    │  NW       │  N        │  NE       │
+    │  9q8yw    │  9q8yx    │  9q8yz    │
+    ├───────────┼───────────┼───────────┤
+    │  W        │  CENTER   │  E        │
+    │  9q8yt    │  9q8yy    │  9q8yz    │
+    ├───────────┼───────────┼───────────┤
+    │  SW       │  S        │  SE       │
+    │  9q8yq    │  9q8yr    │  9q8ys    │
+    └───────────┴───────────┴───────────┘
+
+    For any user in cell "9q8yy", check all 9 cells
+    (center + 8 neighbors) to find nearby friends.
+    Then compute exact distance to filter out false positives.
+</pre>
+          </div>
+
+          <div class="info-box note">
+            <strong>Key Insight:</strong> Geohash is a <strong>coarse filter</strong>, not a precise distance calculator. It quickly narrows down candidates to a small geographic area, but you must always compute the exact Haversine distance to confirm whether a candidate is truly within the 5-mile radius. The neighboring cell problem means you must always check 9 cells (center + 8 neighbors), not just the user&rsquo;s own cell.
+          </div>
+
+          <!-- 4b. QuadTree -->
+          <h3>4b. QuadTree vs. Geohash &mdash; Alternative Spatial Index</h3>
+          <p>A QuadTree is another spatial index that recursively subdivides a 2D space into four quadrants. Each node either contains data points or has four children. It adapts to data density &mdash; dense areas get more subdivisions, sparse areas stay coarse.</p>
+
+          <div class="comparison-grid">
+            <div class="comparison-card">
+              <h4>Geohash</h4>
+<pre><code>Structure:
+  Fixed grid of cells at each precision level.
+  All cells at the same level have the same size.
+
+Encoding:
+  Lat/lng &rarr; base-32 string (e.g., "9q8yyk")
+  Prefix sharing = spatial proximity.
+
+Strengths:
+  • Simple string-based encoding
+  • Easy to store in Redis/databases
+    (string prefix queries)
+  • Fixed cell sizes = predictable behavior
+  • Easy to compute neighboring cells
+  • Works well with key-value stores
+
+Weaknesses:
+  • Fixed grid doesn't adapt to density
+  • Dense areas (NYC) and sparse areas
+    (Sahara) get same-sized cells
+  • Edge/boundary problem requires
+    checking 9 cells instead of 1
+
+Best for:
+  • Database-backed spatial queries
+  • Redis/cache-based proximity
+  • Pub/Sub channel naming</code></pre>
+            </div>
+            <div class="comparison-card">
+              <h4>QuadTree</h4>
+<pre><code>Structure:
+  Recursive tree. Each node splits into 4
+  quadrants when it exceeds a threshold
+  (e.g., max 100 points per leaf).
+
+Encoding:
+  Tree traversal from root to leaf.
+  No simple string representation.
+
+Strengths:
+  • Adapts to data density automatically
+  • Dense areas get fine granularity
+  • Sparse areas stay coarse (efficient)
+  • Natural for range queries
+  • No edge/boundary problem
+
+Weaknesses:
+  • In-memory tree structure (harder to
+    distribute across servers)
+  • More complex to implement
+  • Harder to persist/serialize
+  • Rebalancing needed as data changes
+  • Not natively supported by Redis/DBs
+
+Best for:
+  • In-memory spatial indexing
+  • Finding nearest N points
+  • Density-adaptive applications
+  • Game engines, collision detection</code></pre>
+            </div>
+          </div>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> For &ldquo;Nearby Friends,&rdquo; geohash is the better choice because it integrates naturally with Redis (string keys, prefix queries, pub/sub channel names). QuadTree would be better for a system like &ldquo;find the nearest 10 drivers&rdquo; where density adaptation matters. In an interview, mention both and explain why you chose geohash: &ldquo;Geohash gives us a simple string encoding that works natively with Redis for both caching and pub/sub. The fixed grid size is fine for our use case because our radius is fixed at 5 miles.&rdquo;
+          </div>
+
+          <!-- 4c. Redis Pub/Sub Approach -->
+          <h3>4c. Redis Pub/Sub &mdash; Real-Time Location Propagation</h3>
+          <p>Redis Pub/Sub is the backbone of our real-time update system. Each user who opts in gets a dedicated channel. When they send a location update, it is published to their channel. Friends&rsquo; WebSocket servers subscribe to these channels to receive updates instantly.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    B[Client B<br/>Sends location update]
+
+    WS3[WS Server 3<br/>B's server]
+
+    B -->|WebSocket {lat, lng, ts}| WS3
+
+    WS3 -->|SET user:B:location<br/>TTL 60s| RedisSet[Redis Location Cache]
+    WS3 -->|PUBLISH user:B:location| RedisPub[Redis Pub/Sub]
+    WS3 -->|Async write| LocHistory[Location History DB]
+
+    RedisPub -->|Deliver to subscribers| WS1[WS Server 1]
+    RedisPub -->|Deliver to subscribers| WS2[WS Server 2]
+    RedisPub -->|Deliver to subscribers| WS5[WS Server 5]
+
+    subgraph WS1Detail[WS Server 1 — User A]
+        WS1 -->|dist A B = 2mi < 5mi| PushA[Push to Client A]
+    end
+
+    subgraph WS2Detail[WS Server 2 — User G]
+        WS2 -->|dist G B = 50mi > 5mi| SkipG[Skip]
+    end
+
+    subgraph WS5Detail[WS Server 5 — User K]
+        WS5 -->|dist K B = 0.3mi < 5mi| PushK[Push to Client K]
+    end
+          </div></div>
+
+          <!-- 4d. Location Update Flow -->
+          <h3>4d. Location Update Flow &mdash; End-to-End</h3>
+          <p>Let&rsquo;s trace a complete location update from the moment a user&rsquo;s phone gets a GPS fix to the moment their friend sees the updated distance on their screen.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    GPS[Mobile Client GPS Fix<br/>Every 30s]
+
+    WSServer[WebSocket Server<br/>Receives location update]
+
+    subgraph ParallelActions[3 Parallel Actions]
+        RedisCache[SET user:B:location<br/>TTL 60s]
+        RedisPub[PUBLISH user:B:location<br/>To all subscribers]
+        Kafka[Async write to Kafka<br/>topic: location-history]
+    end
+
+    subgraph FriendsWSServers[Friends WS Servers]
+        FriendsWS[For each subscribed friend]
+        ComputeDist[Compute Haversine distance]
+    end
+
+    PushClient[Push to friend client<br/>friend_nearby / friend_moved / friend_left]
+
+    GPS -->|WebSocket {lat, lng, ts}| WSServer
+    WSServer --> RedisCache
+    WSServer --> RedisPub
+    WSServer --> Kafka
+    RedisPub --> FriendsWS
+    FriendsWS --> ComputeDist
+    ComputeDist -->|< 5mi| PushClient
+          </div></div>
+
+          <!-- 4e. Geohash Channel Management -->
+          <h3>4e. Channel Management &mdash; Handling Online/Offline and Movement</h3>
+          <p>The subscription graph is dynamic: friends come online and go offline, and users move between geohash cells. The WebSocket servers must manage these transitions efficiently to avoid stale subscriptions and missed updates.</p>
+
+          <div class="diagram-box">
+<pre>
+    CHANNEL LIFECYCLE MANAGEMENT
+    &equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;
+
+    EVENT 1: USER COMES ONLINE (opens app with feature on)
+    ────────────────────────────────────────────────────────
+
+    1. Client connects via WebSocket
+    2. WS Server fetches friend list from Friend Service
+    3. WS Server checks which friends are online:
+       - Check Redis for existence of user:{friend_id}:location
+       - If key exists with valid TTL &rarr; friend is online
+    4. Subscribe to online friends' channels:
+       - SUBSCRIBE user:friend1:location
+       - SUBSCRIBE user:friend2:location
+       - ...
+    5. Fetch current locations of online friends from Redis
+    6. Compute initial nearby list and push to client
+    7. Publish own presence to a "user_online" channel
+       so friends' WS servers can subscribe to this user
+
+
+    EVENT 2: FRIEND COMES ONLINE
+    ────────────────────────────────────────────────────────
+
+    When Friend F comes online:
+    1. F's WS server publishes to "user_online" channel:
+       {user_id: F, status: "online"}
+    2. All WS servers with users who are friends of F
+       receive this notification
+    3. Those WS servers subscribe to user:F:location
+    4. Fetch F's current location and check proximity
+
+
+    EVENT 3: USER GOES OFFLINE (app backgrounded / closed)
+    ────────────────────────────────────────────────────────
+
+    1. WebSocket connection closes (detected by WS server)
+    2. WS Server unsubscribes from all friend channels:
+       - UNSUBSCRIBE user:friend1:location
+       - UNSUBSCRIBE user:friend2:location
+       - ...
+    3. Delete user's location from Redis cache:
+       - DEL user:{user_id}:location
+       (or let TTL expire naturally in 60 seconds)
+    4. Publish offline status:
+       {user_id: A, status: "offline"}
+    5. Friends' WS servers unsubscribe from A's channel
+    6. Friends' clients receive "friend_left" event
+
+
+    EVENT 4: USER MOVES TO NEW GEOHASH CELL
+    ────────────────────────────────────────────────────────
+    (Only relevant if using geohash-based Pub/Sub — Approach B)
+
+    1. User's new location has a different geohash prefix
+       Old: "9q8yy" &rarr; New: "9q8yz"
+    2. WS Server detects the geohash change
+    3. Unsubscribe from old cell + neighbors (9 channels)
+    4. Subscribe to new cell + neighbors (9 channels)
+    5. Some channels overlap (only 3-6 actually change)
+
+    Optimization: compute the symmetric difference between
+    old and new neighbor sets. Only unsubscribe/subscribe
+    the channels that actually changed.
+
+    ┌───────────┬───────────┬───────────┐
+    │  OLD      │  OLD      │  OLD      │
+    │  unsub    │  unsub    │  unsub    │
+    ├───────────┼───────────┼───────────┤
+    │  OLD      │  OLD→NEW  │  NEW      │
+    │  unsub    │  (keep)   │  sub      │
+    ├───────────┼───────────┼───────────┤
+    │           │  NEW      │  NEW      │
+    │           │  sub      │  sub      │
+    └───────────┴───────────┴───────────┘
+
+    In this example, user moved from center to the east cell.
+    3 old channels are unsubscribed, 3 new channels are
+    subscribed, and 6 channels overlap (kept).
+</pre>
+          </div>
+
+          <!-- 4f. Scaling WebSocket Servers -->
+          <h3>4f. Scaling WebSocket Servers &mdash; Connection Registry</h3>
+          <p>With 10M concurrent WebSocket connections spread across 100 servers, we need a way to know which user is connected to which server. This is essential for routing push messages and handling server failures.</p>
+
+          <div class="diagram-box">
+<pre>
+    WEBSOCKET SERVER SCALING
+    &equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;
+
+    CONNECTION REGISTRY
+    ────────────────────────────────────────────────────────
+
+    A distributed hash map that tracks:
+      user_id &rarr; {ws_server_id, connection_id, connected_at}
+
+    Stored in Redis (separate from location cache):
+      HSET connections user:A "ws-server-7"
+      HSET connections user:B "ws-server-3"
+      HSET connections user:C "ws-server-7"
+
+    Used for:
+    • Routing: when we need to push to User A, look up
+      which WS server holds A's connection
+    • Presence: check if a user is online (key exists?)
+    • Load balancing: count connections per server
+
+
+    WHY PUB/SUB ELIMINATES MOST ROUTING NEEDS
+    ────────────────────────────────────────────────────────
+
+    With Redis Pub/Sub, we don't need to look up which
+    server a user is on for location updates. The Pub/Sub
+    system handles routing automatically:
+
+    ┌──────────────────────────────────────────────────────┐
+    │                                                      │
+    │  WITHOUT Pub/Sub (direct routing):                   │
+    │  1. User B updates location                          │
+    │  2. Look up all B's friends: [A, C, D, ...]          │
+    │  3. For each friend, look up their WS server         │
+    │  4. Send message to each WS server                   │
+    │  &rarr; N lookups + N network calls per update           │
+    │  &rarr; 333K updates/sec &times; 40 friends = 13.3M lookups/sec│
+    │  &rarr; Extremely expensive!                              │
+    │                                                      │
+    │  WITH Pub/Sub (channel routing):                     │
+    │  1. User B updates location                          │
+    │  2. PUBLISH to user:B:location channel               │
+    │  3. Redis delivers to all subscribed WS servers       │
+    │  &rarr; 1 publish per update (Redis handles fan-out)     │
+    │  &rarr; 333K publishes/sec                               │
+    │  &rarr; Much more efficient!                              │
+    │                                                      │
+    └──────────────────────────────────────────────────────┘
+
+
+    SERVER FAILURE HANDLING
+    ────────────────────────────────────────────────────────
+
+    When a WS server crashes:
+    1. All WebSocket connections on that server drop
+    2. Clients detect disconnection and reconnect
+       (to a different server via load balancer)
+    3. New server re-establishes subscriptions for
+       each reconnected user
+    4. Connection registry is updated automatically
+    5. Brief gap in location updates (~5-10 seconds)
+       while clients reconnect
+
+    Heartbeat mechanism:
+    • WS servers send heartbeats to Redis every 10 seconds
+    • If a server misses 3 heartbeats, it's considered dead
+    • A cleanup worker removes stale connection entries
+      and publishes "offline" events for affected users
+
+
+    SCALING STRATEGY
+    ────────────────────────────────────────────────────────
+
+    ┌──────────────────────────────────────────────────────┐
+    │                                                      │
+    │  Current: 10M users / 100K per server = 100 servers  │
+    │                                                      │
+    │  To handle 2x growth (20M users):                    │
+    │  • Add 100 more WS servers (200 total)               │
+    │  • Redis Pub/Sub scales with more Redis nodes        │
+    │  • No changes to application logic                   │
+    │                                                      │
+    │  Bottleneck at extreme scale:                        │
+    │  • Redis Pub/Sub: 400M subscriptions                 │
+    │  • Solution: shard channels across Redis cluster     │
+    │    using consistent hashing on channel name          │
+    │  • Each Redis node handles ~40M subscriptions        │
+    │                                                      │
+    └──────────────────────────────────────────────────────┘
+</pre>
+          </div>
+
+          <!-- 4g. Privacy -->
+          <h3>4g. Privacy &mdash; Opt-In, Precision Reduction, and Friend Filtering</h3>
+          <p>Location data is extremely sensitive. The system must be designed with privacy as a first-class concern, not an afterthought. Every component must respect the user&rsquo;s privacy settings.</p>
+
+          <div class="diagram-box">
+<pre>
+    PRIVACY CONTROLS
+    &equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;&equiv;
+
+    LAYER 1: OPT-IN / OPT-OUT
+    ────────────────────────────────────────────────────────
+
+    • Feature is OFF by default. User must explicitly enable.
+    • When disabled:
+      - Client stops sending location updates
+      - Server deletes cached location immediately
+      - Server unsubscribes from all friend channels
+      - Server publishes "offline" event to friends
+      - User disappears from all friends' nearby lists
+    • Toggle is instant — no delay in removing location data.
+
+
+    LAYER 2: FRIEND-LIST FILTERING
+    ────────────────────────────────────────────────────────
+
+    Users can choose WHO sees their location:
+
+    ┌──────────────────────────────────────────────────────┐
+    │  Privacy Settings:                                   │
+    │                                                      │
+    │  ○ Share with ALL friends                            │
+    │  ○ Share with SPECIFIC friend lists only             │
+    │    ☑ Close Friends (23 people)                       │
+    │    ☐ Work Colleagues (45 people)                     │
+    │    ☐ Family (12 people)                              │
+    │  ○ Share with NO ONE (feature off)                   │
+    └──────────────────────────────────────────────────────┘
+
+    Implementation:
+    • Store privacy settings in User Service
+    • When setting up subscriptions, filter friend list
+      through privacy settings BEFORE subscribing
+    • If User A shares only with "Close Friends",
+      only those 23 people's WS servers subscribe to
+      A's channel. Others never receive A's updates.
+
+
+    LAYER 3: LOCATION PRECISION REDUCTION
+    ────────────────────────────────────────────────────────
+
+    Don't share exact GPS coordinates with friends.
+    Reduce precision to protect exact location:
+
+    ┌──────────────────────────────────────────────────────┐
+    │                                                      │
+    │  Raw GPS:     37.774929, -122.419416                 │
+    │  (precise to ~1 meter)                               │
+    │                                                      │
+    │  Shared with friends: 37.77, -122.42                 │
+    │  (precise to ~1 km / 0.6 miles)                      │
+    │                                                      │
+    │  Displayed to friends: "~2 miles away"               │
+    │  (not exact coordinates, just distance bucket)       │
+    │                                                      │
+    │  Distance buckets:                                   │
+    │  • "Very close" (&lt; 0.5 miles)                        │
+    │  • "Nearby" (0.5 - 1 mile)                           │
+    │  • "In the area" (1 - 3 miles)                       │
+    │  • "A few miles away" (3 - 5 miles)                  │
+    │                                                      │
+    └──────────────────────────────────────────────────────┘
+
+
+    LAYER 4: DATA RETENTION
+    ────────────────────────────────────────────────────────
+
+    • Location cache TTL: 60 seconds (auto-expires)
+    • Location history: retained for 30 days, then deleted
+    • User can request full deletion of location history
+      (GDPR/CCPA compliance)
+    • Location data is encrypted at rest and in transit
+    • Access logs track who accessed whose location data
+</pre>
+          </div>
+
+          <div class="info-box important">
+            <strong>Privacy is a system design requirement, not a feature.</strong> In an interview, proactively discuss privacy before the interviewer asks. Say: &ldquo;Location data is extremely sensitive. I want to highlight three privacy measures: (1) the feature is strictly opt-in with instant opt-out that deletes all cached location data, (2) users control which friends can see their location via friend-list filtering, and (3) we never share exact coordinates with friends &mdash; we compute distance server-side and only send distance buckets to the client. The server stores precise coordinates temporarily (60s TTL) for distance computation, but friends never see raw lat/lng.&rdquo;
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- TRADE-OFFS -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="tradeoffs"></span>
+        <section class="section">
+          <h2>5. Trade-offs</h2>
+
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Decision</th>
+                  <th>Option A</th>
+                  <th>Option B</th>
+                  <th>Recommendation</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>Geohash vs. QuadTree</strong></td>
+                  <td><strong>Geohash:</strong> Simple string encoding. Works natively with Redis keys and Pub/Sub channel names. Fixed grid size. Easy to compute neighbors. Well-suited for database/cache-backed systems.</td>
+                  <td><strong>QuadTree:</strong> Adaptive to data density. Better for variable-density scenarios (cities vs. rural). In-memory tree structure. Harder to distribute. More complex implementation.</td>
+                  <td>Use <strong>Geohash</strong> for this system. Our radius is fixed (5 miles), so density adaptation is unnecessary. Geohash integrates naturally with Redis for caching and channel naming. QuadTree is better for &ldquo;find nearest N drivers&rdquo; where density varies wildly.</td>
+                </tr>
+                <tr>
+                  <td><strong>Pub/Sub per user vs. per geohash</strong></td>
+                  <td><strong>Per-user channels:</strong> Each user has a dedicated channel. Friends subscribe to each other&rsquo;s channels. Zero wasted messages &mdash; every received update is from a friend. 400M total subscriptions at scale.</td>
+                  <td><strong>Per-geohash channels:</strong> Each geohash cell has a channel. Users subscribe to their cell + 8 neighbors. Receives updates from ALL users in the area, not just friends. Must filter by friend list. High noise in dense areas.</td>
+                  <td>Use <strong>per-user channels</strong> for a friends-based system. The friend list is small (40 online friends), so 40 subscriptions per user is efficient. Per-geohash channels would flood users in Manhattan with thousands of irrelevant updates from strangers. Per-geohash is better for &ldquo;find nearby strangers&rdquo; use cases.</td>
+                </tr>
+                <tr>
+                  <td><strong>Pub/Sub vs. polling</strong></td>
+                  <td><strong>Pub/Sub (push-based):</strong> Updates are pushed to friends instantly when a location changes. Low latency (~100 ms). Efficient &mdash; no wasted requests. Requires persistent WebSocket connections and subscription management.</td>
+                  <td><strong>Polling:</strong> Each client periodically requests friends&rsquo; locations (e.g., every 10 seconds). Simpler architecture &mdash; stateless HTTP servers. Higher latency (up to 10 seconds stale). Wasteful &mdash; most polls return no changes. 10M users &times; 6 polls/min = 1M requests/sec.</td>
+                  <td>Use <strong>Pub/Sub</strong>. The 500 ms latency requirement rules out polling. Pub/Sub delivers updates in ~100 ms and only sends data when something changes. The WebSocket infrastructure adds complexity but is essential for real-time UX. Polling would generate 1M wasted requests/sec.</td>
+                </tr>
+                <tr>
+                  <td><strong>Update frequency: 30s vs. 10s vs. 60s</strong></td>
+                  <td><strong>10 seconds:</strong> More responsive. 1M updates/sec (3x load). Higher battery drain on mobile. More precise tracking. Better UX for fast-moving users.</td>
+                  <td><strong>60 seconds:</strong> Lower load (167K updates/sec). Better battery life. Acceptable for walking-speed movement. Stale data for driving-speed users.</td>
+                  <td>Use <strong>30 seconds</strong> as the default with adaptive frequency. If the user is stationary (GPS delta &lt; 50m), reduce to 60s. If moving fast (driving), increase to 10s. This balances battery life, server load, and UX. The client should skip updates when stationary to save bandwidth.</td>
+                </tr>
+                <tr>
+                  <td><strong>Precision vs. privacy</strong></td>
+                  <td><strong>Exact coordinates:</strong> Share precise lat/lng with friends. Enables accurate distance display and map pinpointing. Privacy risk: friends know your exact location (home address, workplace).</td>
+                  <td><strong>Distance buckets only:</strong> Compute distance server-side, share only buckets (&ldquo;nearby&rdquo;, &ldquo;a few miles away&rdquo;). Friends cannot pinpoint exact location. Less useful for &ldquo;meet up&rdquo; scenarios. Better privacy.</td>
+                  <td>Use <strong>distance buckets</strong> by default with an option to share precise location with specific friends. The server computes exact distance using raw coordinates (stored with 60s TTL), but only sends distance buckets to clients. Users who want to share exact location for meetups can enable &ldquo;precise sharing&rdquo; for individual friends.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> When discussing trade-offs, tie them back to the requirements: &ldquo;We chose per-user Pub/Sub over per-geohash because our system is friends-based &mdash; we only care about 40 online friends, not millions of strangers. Per-geohash would be the right choice for Uber (finding nearby drivers), but for a social network, per-user channels eliminate all wasted messages. We chose push over polling because our 500 ms latency requirement makes polling impractical &mdash; even 5-second polling would miss the target half the time. We chose 30-second updates with adaptive frequency because it balances battery life (critical for mobile) with freshness.&rdquo;
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- REVISION CHECKLIST -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="revision"></span>
+        <section class="section">
+          <h2>6. Revision Checklist</h2>
+          <p>Use this checklist to verify you can recall the key concepts before your interview.</p>
+
+          <div class="checklist">
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Architecture overview:</strong> Mobile clients connect via WebSocket to WS servers. Location updates flow: Client &rarr; WebSocket Server &rarr; Redis (cache + Pub/Sub) &rarr; Friends&rsquo; WS Servers &rarr; Friends&rsquo; clients. Redis serves dual purpose: location cache (key-value with TTL) and real-time message routing (Pub/Sub channels).</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Per-user Pub/Sub is the key design choice.</strong> Each user gets a dedicated Redis Pub/Sub channel. Friends&rsquo; WS servers subscribe to each other&rsquo;s channels. When a location update is published, only friends receive it &mdash; zero wasted messages. This is better than per-geohash channels for a friends-based system because we only care about 40 online friends, not millions of strangers.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Scale numbers:</strong> 100M DAU, 10M concurrent, 333K location updates/sec, 32 bytes per update = 10 MB/sec ingestion. 40 online friends per user = 13.3M proximity checks/sec. 400M Pub/Sub subscriptions across Redis cluster. 100 WebSocket servers at 100K connections each. 666K push messages/sec to clients.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Geohash for spatial indexing:</strong> Encodes lat/lng into a base-32 string where nearby points share prefixes. Length 5 = ~4.9 km cells (matches our 5-mile radius). Must check center cell + 8 neighbors to handle edge cases. Used for initial bootstrap query and optionally for geohash-based Pub/Sub channels.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Geohash vs. QuadTree:</strong> Geohash is a fixed grid with string encoding (works with Redis/databases). QuadTree is an adaptive tree (better for variable density). Choose geohash for this system because it integrates with Redis and our radius is fixed. QuadTree is better for &ldquo;find nearest N drivers&rdquo; scenarios.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>WebSocket connection management:</strong> 10M persistent connections across 100 servers. Connection registry in Redis maps user_id &rarr; ws_server_id. Pub/Sub eliminates most direct routing needs. Server failures handled by client reconnection + re-subscription. Heartbeat mechanism detects dead servers.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Location update flow (end-to-end):</strong> Client sends GPS via WebSocket &rarr; WS server updates Redis cache (SET with 60s TTL) &rarr; publishes to user&rsquo;s Pub/Sub channel &rarr; friends&rsquo; WS servers receive update &rarr; compute Haversine distance &rarr; if &lt; 5 miles, push to friend&rsquo;s client. Total latency: ~100 ms.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Channel lifecycle:</strong> User comes online &rarr; subscribe to online friends&rsquo; channels. Friend comes online &rarr; subscribe to their channel. User goes offline &rarr; unsubscribe all, delete location, publish offline event. User moves to new geohash &rarr; compute symmetric difference of old/new neighbor sets, subscribe/unsubscribe only changed channels.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Privacy is a first-class concern:</strong> Feature is opt-in (off by default). Instant opt-out deletes all cached location data. Friend-list filtering controls who sees your location. Location precision reduction: server computes exact distance but only sends distance buckets to clients. 60s TTL auto-expires stale data. GDPR/CCPA: 30-day retention with user-requested deletion.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Adaptive update frequency:</strong> Default 30-second interval. Skip updates if stationary (GPS delta &lt; 50m) to save battery. Increase to 10s if moving fast (driving). This balances battery life, server load, and UX. Client-side optimization: batch location updates if network is temporarily unavailable.</span>
+            </label>
+          </div>
+        </section>
+
+        <!-- Bottom nav -->
+        <div class="problem-nav">
+          <a href="web-crawler.html"><span class="nav-label">Previous</span><span class="nav-title">Web Crawler</span></a>
+          <a href="message-queue.html" class="next"><span class="nav-label">Next</span><span class="nav-title">Message Queue</span></a>
+        </div>
+      </div>
+    </div>
+  </main>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script src="../js/app.js"></script>
+</body>
+</html>

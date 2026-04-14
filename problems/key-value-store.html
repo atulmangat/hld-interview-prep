@@ -1,0 +1,1080 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Design Key-Value Store — HLD Interview Prep</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+  <nav class="top-nav">
+    <div class="top-nav-inner">
+      <a href="../index.html" class="nav-logo">
+        <div class="nav-logo-icon">SD</div>
+        <span>HLD Interview Prep</span>
+      </a>
+      <div class="nav-actions">
+        <div class="nav-breadcrumb">
+          <a href="../index.html">Home</a>
+          <span class="separator">/</span>
+          <span class="current">Key-Value Store</span>
+        </div>
+        <button class="theme-toggle" id="theme-toggle">&#x263E;</button>
+      </div>
+    </div>
+  </nav>
+  <div class="scroll-progress"></div>
+
+  <main class="main-content">
+    <div class="problem-page">
+      <!-- Sidebar TOC -->
+      <aside class="sidebar">
+        <div class="sidebar-title">On This Page</div>
+        <ul class="toc-list">
+          <li><a href="#requirements">Requirements</a></li>
+          <li><a href="#estimation">Capacity Estimation</a></li>
+          <li><a href="#api-design">API Design</a></li>
+          <li><a href="#data-model">Data Model</a></li>
+          <li><a href="#high-level-design">High-Level Design</a></li>
+          <li><a href="#deep-dive">Deep Dive</a></li>
+          <li><a href="#tradeoffs">Trade-offs</a></li>
+          <li><a href="#revision">Revision Checklist</a></li>
+        </ul>
+        <div class="progress-bar"><div class="progress-fill" style="width: 0%"></div></div>
+      </aside>
+
+      <div class="problem-content">
+        <!-- Header -->
+        <div class="problem-header">
+          <h1>Design a Distributed Key-Value Store</h1>
+          <p class="problem-subtitle">Design a highly available, partition-tolerant distributed key-value store similar to Amazon DynamoDB, Apache Cassandra, or Riak &mdash; supporting tunable consistency, automatic data partitioning, replication, and failure handling at massive scale.</p>
+          <div class="problem-meta-bar">
+            <span class="meta-badge difficulty-hard">Hard</span>
+            <span class="meta-badge">Storage &amp; Data</span>
+            <span class="meta-badge">Asked at: Amazon, Google, LinkedIn</span>
+          </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- REQUIREMENTS -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="requirements"></span>
+        <section class="section">
+          <h2>1. Requirements</h2>
+
+          <h3>Functional Requirements</h3>
+          <ul class="content-list">
+            <li><strong><code>put(key, value)</code></strong> &mdash; Insert or update a value associated with a key.</li>
+            <li><strong><code>get(key)</code></strong> &mdash; Retrieve the value associated with a key.</li>
+            <li><strong><code>delete(key)</code></strong> &mdash; Remove a key-value pair from the store.</li>
+            <li><strong>Automatic scaling</strong> &mdash; The system should automatically distribute data across nodes and rebalance when nodes are added or removed.</li>
+            <li><strong>Tunable consistency</strong> &mdash; Clients can choose consistency levels per request (strong, eventual, or somewhere in between).</li>
+            <li><strong>High availability</strong> &mdash; The system continues to accept reads and writes even when some nodes are down.</li>
+          </ul>
+
+          <h3>Non-Functional Requirements</h3>
+          <ul class="content-list">
+            <li><strong>Low latency:</strong> &lt;10ms p99 for both reads and writes.</li>
+            <li><strong>High availability:</strong> 99.99% uptime (less than 52 minutes of downtime per year).</li>
+            <li><strong>High throughput:</strong> Handle 100K+ operations per second per cluster.</li>
+            <li><strong>Durability:</strong> Once a write is acknowledged, the data must not be lost (even if individual nodes fail).</li>
+            <li><strong>Scalability:</strong> Scale horizontally to handle billions of keys and tens of terabytes of data.</li>
+          </ul>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> Always clarify whether the interviewer wants a CP system (like HBase/ZooKeeper) or an AP system (like Cassandra/DynamoDB). This single decision shapes the entire architecture. If they say &ldquo;highly available,&rdquo; lean toward AP with tunable consistency.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- ESTIMATION -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="estimation"></span>
+        <section class="section">
+          <h2>2. Capacity Estimation</h2>
+
+          <h3>Assumptions</h3>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Parameter</th>
+                  <th>Value</th>
+                  <th>Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Operations per second</td>
+                  <td>100,000 ops/sec</td>
+                  <td>Mix of reads and writes (typically 80/20 read-heavy)</td>
+                </tr>
+                <tr>
+                  <td>Average key size</td>
+                  <td>100 bytes</td>
+                  <td>String keys, e.g. user IDs, session tokens</td>
+                </tr>
+                <tr>
+                  <td>Average value size</td>
+                  <td>1 KB</td>
+                  <td>JSON objects, serialized data</td>
+                </tr>
+                <tr>
+                  <td>Total number of keys</td>
+                  <td>10 billion</td>
+                  <td>Accumulated over time</td>
+                </tr>
+                <tr>
+                  <td>Replication factor</td>
+                  <td>3</td>
+                  <td>Each key stored on 3 nodes</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>Storage Calculation</h3>
+<pre><code>Raw data per key   = 100 B (key) + 1 KB (value) + 100 B (metadata)
+                   ≈ 1.2 KB per key-value pair
+
+Total raw storage  = 10B keys × 1.2 KB
+                   = 12 TB
+
+With 3x replication = 12 TB × 3
+                    = 36 TB total storage
+
+Per-node storage (20 nodes) = 36 TB / 20
+                             = 1.8 TB per node</code></pre>
+
+          <h3>Throughput Calculation</h3>
+<pre><code>Bandwidth per operation = ~1 KB (avg value)
+Total bandwidth         = 100K ops/sec × 1 KB
+                        = 100 MB/sec cluster-wide
+
+Per-node throughput (20 nodes) = 100 MB/sec / 20
+                                = 5 MB/sec per node (easily handled)</code></pre>
+
+          <div class="info-box note">
+            <strong>Key Insight:</strong> The storage requirement (~36 TB) is modest for modern hardware. The real challenge is not raw storage but achieving low-latency access, handling concurrent operations, maintaining consistency across replicas, and recovering from failures &mdash; all at 100K+ ops/sec.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- API DESIGN -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="api-design"></span>
+        <section class="section">
+          <h2>3. API Design</h2>
+
+          <div class="api-endpoint">
+            <div class="api-endpoint-header">
+              <span class="api-method put">PUT</span>
+              <span class="api-path">/v1/kv/{key}</span>
+            </div>
+            <div class="api-endpoint-body">
+              <p>Insert or update a key-value pair. The value is sent in the request body.</p>
+<pre><code>Request:
+  PUT /v1/kv/user:12345
+  Headers:
+    Content-Type: application/octet-stream
+    X-Consistency: quorum          // one | quorum | all
+    X-Timestamp: 1713100800000     // client-side timestamp (optional)
+  Body: &lt;binary value&gt;
+
+Response (200 OK):
+{
+  "key": "user:12345",
+  "version": "v3",
+  "timestamp": 1713100800000,
+  "replicas_acked": 2
+}</code></pre>
+            </div>
+          </div>
+
+          <div class="api-endpoint">
+            <div class="api-endpoint-header">
+              <span class="api-method get">GET</span>
+              <span class="api-path">/v1/kv/{key}</span>
+            </div>
+            <div class="api-endpoint-body">
+              <p>Retrieve the value associated with a key.</p>
+<pre><code>Request:
+  GET /v1/kv/user:12345
+  Headers:
+    X-Consistency: quorum          // one | quorum | all
+
+Response (200 OK):
+{
+  "key": "user:12345",
+  "value": "&lt;base64-encoded value&gt;",
+  "version": "v3",
+  "timestamp": 1713100800000
+}
+
+Response (404 Not Found):
+{
+  "error": "KEY_NOT_FOUND",
+  "message": "Key 'user:12345' does not exist"
+}</code></pre>
+            </div>
+          </div>
+
+          <div class="api-endpoint">
+            <div class="api-endpoint-header">
+              <span class="api-method delete">DELETE</span>
+              <span class="api-path">/v1/kv/{key}</span>
+            </div>
+            <div class="api-endpoint-body">
+              <p>Delete a key-value pair. In distributed systems, deletes are typically handled as <strong>tombstones</strong> (a special marker indicating deletion) rather than immediate physical removal.</p>
+<pre><code>Request:
+  DELETE /v1/kv/user:12345
+  Headers:
+    X-Consistency: quorum
+
+Response (200 OK):
+{
+  "key": "user:12345",
+  "deleted": true,
+  "tombstone_expiry": "2025-04-14T00:00:00Z"
+}</code></pre>
+            </div>
+          </div>
+
+          <div class="info-box warning">
+            <strong>Tombstones Matter:</strong> In a distributed KV store, you cannot simply remove a record. If you delete on node A but node B is temporarily down, when B comes back it still has the key and would replicate it back. Instead, write a <strong>tombstone</strong> (a deletion marker with a timestamp). Tombstones are garbage-collected after a configurable grace period (e.g., 10 days in Cassandra&rsquo;s <code>gc_grace_seconds</code>).
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- DATA MODEL -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="data-model"></span>
+        <section class="section">
+          <h2>4. Data Model</h2>
+
+          <h3>Key-Value Record Structure</h3>
+          <p>Each record stored in the system contains more than just the key and value. Metadata is essential for replication, conflict resolution, and garbage collection.</p>
+
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Field</th>
+                  <th>Type</th>
+                  <th>Size</th>
+                  <th>Purpose</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>key</code></td>
+                  <td>byte[]</td>
+                  <td>Variable (max 256 B)</td>
+                  <td>Unique identifier for the record</td>
+                </tr>
+                <tr>
+                  <td><code>value</code></td>
+                  <td>byte[]</td>
+                  <td>Variable (max 1 MB)</td>
+                  <td>The actual data payload</td>
+                </tr>
+                <tr>
+                  <td><code>version</code></td>
+                  <td>VectorClock / int64</td>
+                  <td>~50 B</td>
+                  <td>Conflict detection and resolution</td>
+                </tr>
+                <tr>
+                  <td><code>timestamp</code></td>
+                  <td>int64</td>
+                  <td>8 B</td>
+                  <td>Last-write-wins ordering, TTL expiry</td>
+                </tr>
+                <tr>
+                  <td><code>checksum</code></td>
+                  <td>uint32 (CRC32)</td>
+                  <td>4 B</td>
+                  <td>Data integrity verification</td>
+                </tr>
+                <tr>
+                  <td><code>tombstone</code></td>
+                  <td>boolean</td>
+                  <td>1 B</td>
+                  <td>Marks the record as deleted</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>Storage Engine: LSM-Tree vs B-Tree</h3>
+          <p>The choice of on-disk storage engine fundamentally affects read/write performance characteristics.</p>
+
+          <div class="comparison-grid">
+            <div class="comparison-card">
+              <h4>LSM-Tree (Log-Structured Merge-Tree)</h4>
+              <p><strong>Write-optimized.</strong> All writes go to an in-memory buffer (memtable), then are flushed to sorted immutable files (SSTables) on disk. Background compaction merges SSTables.</p>
+              <ul class="content-list">
+                <li><strong>Writes:</strong> O(1) amortized &mdash; sequential I/O only</li>
+                <li><strong>Reads:</strong> O(log N) &mdash; may check multiple SSTables</li>
+                <li><strong>Space amplification:</strong> Higher (multiple copies during compaction)</li>
+                <li><strong>Used by:</strong> Cassandra, HBase, RocksDB, LevelDB</li>
+              </ul>
+            </div>
+            <div class="comparison-card">
+              <h4>B-Tree</h4>
+              <p><strong>Read-optimized.</strong> Data is stored in a balanced tree structure on disk. Writes require finding and updating the correct page in-place, potentially causing random I/O.</p>
+              <ul class="content-list">
+                <li><strong>Writes:</strong> O(log N) &mdash; random I/O for page updates</li>
+                <li><strong>Reads:</strong> O(log N) &mdash; single tree traversal</li>
+                <li><strong>Space amplification:</strong> Lower (in-place updates)</li>
+                <li><strong>Used by:</strong> MySQL (InnoDB), PostgreSQL, MongoDB (WiredTiger)</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="info-box note">
+            <strong>Why LSM-Trees Dominate KV Stores:</strong> Distributed KV stores typically choose LSM-trees because (1) writes are the bottleneck in distributed replication, (2) sequential I/O is dramatically faster on both HDDs and SSDs, and (3) the compaction process naturally handles tombstone cleanup. Cassandra, DynamoDB, and RocksDB all use LSM-tree variants.
+          </div>
+
+          <h3>LSM-Tree Architecture</h3>
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    W[Write] --> MEM[Memtable - RAM\nRed-Black Tree or Skip List\nSorted by key ~64 MB]
+    MEM -->|Flush when full| CL[Commit Log - Disk\nWrite-ahead log for durability\nAppend-only sequential writes]
+    CL --> SS0[SSTable Level 0 - Disk\nImmutable sorted files ~64 MB]
+    SS0 -->|Compaction| SS1[SSTable Level 1 - Disk\nMerged and sorted ~640 MB]
+    SS1 -->|Compaction| SS2[SSTable Level 2 - Disk\nMerged and sorted ~6.4 GB]
+    style W fill:#4ecdc4,stroke:#087f8c,color:#000
+    style MEM fill:#ffe66d,stroke:#f7b731,color:#000
+    style CL fill:#a8e6cf,stroke:#3ddc84,color:#000
+    style SS0 fill:#74b9ff,stroke:#0984e3,color:#000
+    style SS1 fill:#74b9ff,stroke:#0984e3,color:#000
+    style SS2 fill:#74b9ff,stroke:#0984e3,color:#000
+          </div></div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- HIGH-LEVEL DESIGN -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="high-level-design"></span>
+        <section class="section">
+          <h2>5. High-Level Design</h2>
+
+          <p>The architecture follows a <strong>leaderless, peer-to-peer</strong> design (like Dynamo/Cassandra) where any node can accept reads and writes. Data is partitioned across nodes using consistent hashing and replicated to N nodes for fault tolerance.</p>
+
+          <h3>System Architecture</h3>
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    CA[Client A] --> LB[Load Balancer\nRound-robin to any node]
+    CB[Client B] --> LB
+    CC[Client C] --> LB
+    LB --> N1
+    LB --> N2
+    LB --> N3
+
+    subgraph N1[Node 1 - Coordinator]
+        M1[MemTable] --> CL1[CommitLog] --> ST1[SSTables]
+    end
+    subgraph N2[Node 2]
+        M2[MemTable] --> CL2[CommitLog] --> ST2[SSTables]
+    end
+    subgraph N3[Node 3]
+        M3[MemTable] --> CL3[CommitLog] --> ST3[SSTables]
+    end
+
+    N1 --> HR[Consistent Hash Ring\nN1 to N5 mapped to key ranges\nEach range replicated to next N-1 nodes]
+    N2 --> HR
+    N3 --> HR
+
+    HR --> GP[Gossip Protocol\nFailure detection via heartbeat\nMembership changes\nSchema and config propagation]
+
+    style LB fill:#74b9ff,stroke:#0984e3,color:#000
+    style HR fill:#ffe66d,stroke:#f7b731,color:#000
+    style GP fill:#a8e6cf,stroke:#3ddc84,color:#000
+    style CA fill:#dfe6e9,stroke:#636e72,color:#000
+    style CB fill:#dfe6e9,stroke:#636e72,color:#000
+    style CC fill:#dfe6e9,stroke:#636e72,color:#000
+          </div></div>
+
+          <h3>Request Flow Overview</h3>
+          <div class="flow-container">
+            <div class="flow-box">Client</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">Load Balancer</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Coordinator Node</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">Hash Key</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Replicate to N Nodes</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">Wait for W/R Acks</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Return to Client</div>
+          </div>
+
+          <h3>Key Components</h3>
+          <ul class="content-list">
+            <li><strong>Coordinator Node:</strong> Any node that receives a client request acts as the coordinator. It determines which nodes own the key (via consistent hashing) and forwards the request to those nodes.</li>
+            <li><strong>Consistent Hash Ring:</strong> Maps keys to nodes. Uses virtual nodes (150&ndash;200 per physical node) for balanced distribution. See the <a href="consistent-hashing.html">Consistent Hashing</a> page for details.</li>
+            <li><strong>Replication:</strong> Each key is stored on N nodes (typically N=3). The coordinator writes to all N replicas and waits for W acknowledgments before responding to the client.</li>
+            <li><strong>Gossip Protocol:</strong> Nodes exchange membership and health information peer-to-peer. No single point of failure for cluster coordination.</li>
+          </ul>
+
+          <div class="info-box important">
+            <strong>Why Leaderless?</strong> A leader-based design (like Raft/Paxos) provides strong consistency but creates a single point of failure per partition and adds latency (writes must go through the leader). A leaderless design allows any node to accept writes, maximizing availability &mdash; at the cost of potential conflicts that must be resolved.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- DEEP DIVE -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="deep-dive"></span>
+        <section class="section">
+          <h2>6. Deep Dive</h2>
+
+          <!-- 6a. CAP Theorem -->
+          <h3>6a. CAP Theorem &amp; System Classification</h3>
+          <p>The CAP theorem states that a distributed system can provide at most <strong>two out of three</strong> guarantees: Consistency, Availability, and Partition tolerance. Since network partitions are inevitable, the real choice is between <strong>CP</strong> (consistency + partition tolerance) and <strong>AP</strong> (availability + partition tolerance).</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    C[Consistency] ---|CP Systems\nHBase ZooKeeper MongoDB| A[Availability]
+    C ---|Cannot have all three| P[Partition Tolerance]
+    A ---|AP Systems\nCassandra DynamoDB Riak| P
+
+    NOTE[P is non-negotiable\nCP - Refuse requests during partitions\nAP - Accept requests during partitions]
+
+    style C fill:#ff7675,stroke:#d63031,color:#000
+    style A fill:#74b9ff,stroke:#0984e3,color:#000
+    style P fill:#a8e6cf,stroke:#3ddc84,color:#000
+    style NOTE fill:#ffeaa7,stroke:#fdcb6e,color:#000
+          </div></div>
+
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>System</th>
+                  <th>Type</th>
+                  <th>During Partition</th>
+                  <th>Consistency Model</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>HBase</strong></td>
+                  <td>CP</td>
+                  <td>Rejects writes to affected regions</td>
+                  <td>Strong consistency (single leader per region)</td>
+                </tr>
+                <tr>
+                  <td><strong>MongoDB</strong></td>
+                  <td>CP</td>
+                  <td>Primary unavailable &rarr; no writes until election</td>
+                  <td>Strong (with majority write concern)</td>
+                </tr>
+                <tr>
+                  <td><strong>Cassandra</strong></td>
+                  <td>AP</td>
+                  <td>Continues serving reads/writes on available nodes</td>
+                  <td>Tunable (ONE to ALL)</td>
+                </tr>
+                <tr>
+                  <td><strong>DynamoDB</strong></td>
+                  <td>AP (tunable)</td>
+                  <td>Continues serving; may return stale reads</td>
+                  <td>Eventually consistent (strong optional)</td>
+                </tr>
+                <tr>
+                  <td><strong>Riak</strong></td>
+                  <td>AP</td>
+                  <td>Continues serving; uses vector clocks for conflicts</td>
+                  <td>Eventually consistent</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> Don&rsquo;t just say &ldquo;we pick AP.&rdquo; Explain <em>why</em>: for a key-value store serving user-facing traffic, a few milliseconds of stale data is usually acceptable, but downtime is not. Shopping carts (Amazon&rsquo;s original Dynamo use case) should always be writable &mdash; even if two conflicting carts must be merged later.
+          </div>
+
+          <!-- 6b. Data Partitioning -->
+          <h3>6b. Data Partitioning</h3>
+          <p>Data is distributed across nodes using <strong>consistent hashing with virtual nodes</strong>. Each physical node is assigned 100&ndash;200 virtual nodes (tokens) on the hash ring, ensuring balanced data distribution.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph LR
+    subgraph Ring[Consistent Hash Ring 0 to 2^32]
+        N1V3[N1-v3] --> N3V1[N3-v1]
+        N3V1 --> N1V1[N1-v1]
+        N1V1 --> N2V1[N2-v1]
+        N2V1 --> N3V2[N3-v2]
+        N3V2 --> N1V4[N1-v4]
+        N1V4 --> N2V3[N2-v3]
+        N2V3 --> N1V2[N1-v2]
+        N1V2 --> N3V3[N3-v3]
+        N3V3 --> N2V2[N2-v2]
+        N2V2 --> N1V3
+    end
+
+    KEY[hash user 42 = pos 1500] -.->|walk clockwise| N1V1
+    N1V1 -.->|replicate| N2V1
+    N2V1 -.->|replicate| N3V2
+
+    style N1V1 fill:#ff7675,stroke:#d63031,color:#000
+    style N1V2 fill:#ff7675,stroke:#d63031,color:#000
+    style N1V3 fill:#ff7675,stroke:#d63031,color:#000
+    style N1V4 fill:#ff7675,stroke:#d63031,color:#000
+    style N2V1 fill:#74b9ff,stroke:#0984e3,color:#000
+    style N2V2 fill:#74b9ff,stroke:#0984e3,color:#000
+    style N2V3 fill:#74b9ff,stroke:#0984e3,color:#000
+    style N3V1 fill:#a8e6cf,stroke:#3ddc84,color:#000
+    style N3V2 fill:#a8e6cf,stroke:#3ddc84,color:#000
+    style N3V3 fill:#a8e6cf,stroke:#3ddc84,color:#000
+    style KEY fill:#ffeaa7,stroke:#fdcb6e,color:#000
+          </div></div>
+
+          <p>When a node joins or leaves, only the keys in the affected token ranges are redistributed &mdash; approximately <code>K/N</code> keys move (where K is total keys, N is number of nodes). This is the minimum possible redistribution.</p>
+
+          <!-- 6c. Replication -->
+          <h3>6c. Replication &amp; Quorum Consensus</h3>
+          <p>Each key is replicated to <strong>N</strong> nodes (the replication factor, typically 3). The coordinator writes to all N replicas but only waits for <strong>W</strong> acknowledgments (write quorum) before responding to the client. Similarly, reads query all N replicas but only wait for <strong>R</strong> responses (read quorum).</p>
+
+          <h4>The Quorum Formula</h4>
+          <div class="info-box important">
+            <strong>Strong Consistency Guarantee:</strong> If <code>W + R &gt; N</code>, at least one node in the read quorum must have the latest write. This guarantees the client always sees the most recent value. The overlapping node ensures no stale read can occur.
+          </div>
+
+<pre><code>N = Number of replicas (typically 3)
+W = Number of write acknowledgments required
+R = Number of read responses required
+
+Strong consistency:  W + R > N
+                     Guarantees overlap between read and write sets
+
+Example with N=3:
+  W=2, R=2 → 2+2=4 > 3 ✓ (strong consistency, balanced)
+  W=3, R=1 → 3+1=4 > 3 ✓ (strong consistency, fast reads)
+  W=1, R=3 → 1+3=4 > 3 ✓ (strong consistency, fast writes)
+  W=1, R=1 → 1+1=2 < 3 ✗ (eventual consistency, fastest)</code></pre>
+
+          <h4>Quorum Configuration Trade-offs</h4>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Config (N=3)</th>
+                  <th>W</th>
+                  <th>R</th>
+                  <th>Consistency</th>
+                  <th>Write Latency</th>
+                  <th>Read Latency</th>
+                  <th>Write Availability</th>
+                  <th>Best For</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>Balanced</strong></td>
+                  <td>2</td>
+                  <td>2</td>
+                  <td>Strong</td>
+                  <td>Medium</td>
+                  <td>Medium</td>
+                  <td>Tolerates 1 failure</td>
+                  <td>General purpose</td>
+                </tr>
+                <tr>
+                  <td><strong>Fast reads</strong></td>
+                  <td>3</td>
+                  <td>1</td>
+                  <td>Strong</td>
+                  <td>High</td>
+                  <td>Low</td>
+                  <td>No failures tolerated</td>
+                  <td>Read-heavy workloads</td>
+                </tr>
+                <tr>
+                  <td><strong>Fast writes</strong></td>
+                  <td>1</td>
+                  <td>3</td>
+                  <td>Strong</td>
+                  <td>Low</td>
+                  <td>High</td>
+                  <td>Tolerates 2 failures</td>
+                  <td>Write-heavy workloads</td>
+                </tr>
+                <tr>
+                  <td><strong>Eventual</strong></td>
+                  <td>1</td>
+                  <td>1</td>
+                  <td>Eventual</td>
+                  <td>Low</td>
+                  <td>Low</td>
+                  <td>Tolerates 2 failures</td>
+                  <td>Max throughput, stale OK</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="mermaid-container"><div class="mermaid">
+sequenceDiagram
+    participant CW as Client Write
+    participant CO as Coordinator
+    participant R1 as Replica 1
+    participant R2 as Replica 2
+    participant R3 as Replica 3
+
+    Note over CW,R3: Write with W=2 N=3
+    CW->>CO: PUT key value
+    CO->>R1: write
+    CO->>R2: write
+    CO->>R3: write
+    R1-->>CO: ACK
+    R2-->>CO: ACK
+    Note over CO: 2 ACKs received
+    CO-->>CW: Success
+    R3-->>CO: ACK async
+
+    Note over CW,R3: Read with R=2 N=3
+    CW->>CO: GET key
+    CO->>R1: read
+    CO->>R2: read
+    CO->>R3: read
+    R1-->>CO: value v3
+    R2-->>CO: value v3
+    Note over CO: Pick latest version
+    CO-->>CW: Return v3
+    R3-->>CO: value v2 stale
+    Note over CO,R3: Read repair v2 to v3
+          </div></div>
+
+          <!-- 6d. Consistency -->
+          <h3>6d. Consistency &amp; Conflict Resolution</h3>
+          <p>In an AP system, concurrent writes to the same key on different nodes can create <strong>conflicting versions</strong>. The system needs a strategy to detect and resolve these conflicts.</p>
+
+          <h4>Vector Clocks</h4>
+          <p>A vector clock is a list of <code>(node, counter)</code> pairs that tracks the causal history of a value. Each node increments its own counter on every write. By comparing vector clocks, the system can determine if one version <em>happened before</em> another, or if they are <em>concurrent</em> (conflicting).</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    D0[D0 empty] --> D1[D1 A=1\nvalue v1\nClient A writes to Node A]
+    D1 --> D2[D2 A=2\nvalue v2\nClient A writes again]
+    D2 --> D3[D3 A=2 B=1\nvalue v3\nClient B writes to Node B]
+    D2 --> D4[D4 A=2 C=1\nvalue v4\nClient C writes to Node C]
+    D3 --> CONFLICT[CONFLICT\nD3 and D4 are concurrent\nNeither is ancestor of the other]
+    D4 --> CONFLICT
+    CONFLICT --> D5[D5 A=2 B=1 C=1\nvalue merge v3 v4\nClient resolves conflict]
+
+    style D0 fill:#dfe6e9,stroke:#636e72,color:#000
+    style D1 fill:#74b9ff,stroke:#0984e3,color:#000
+    style D2 fill:#74b9ff,stroke:#0984e3,color:#000
+    style D3 fill:#a8e6cf,stroke:#3ddc84,color:#000
+    style D4 fill:#ff7675,stroke:#d63031,color:#000
+    style CONFLICT fill:#ffeaa7,stroke:#e17055,color:#000
+    style D5 fill:#55efc4,stroke:#00b894,color:#000
+          </div></div>
+
+          <h4>Conflict Resolution Strategies</h4>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Strategy</th>
+                  <th>How It Works</th>
+                  <th>Pros</th>
+                  <th>Cons</th>
+                  <th>Used By</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>Last-Write-Wins (LWW)</strong></td>
+                  <td>Attach a timestamp to each write. Highest timestamp wins.</td>
+                  <td>Simple, no client involvement</td>
+                  <td>Data loss (silently drops concurrent writes); clock skew issues</td>
+                  <td>Cassandra (default)</td>
+                </tr>
+                <tr>
+                  <td><strong>Application-level resolution</strong></td>
+                  <td>Return all conflicting versions to the client. Client merges them.</td>
+                  <td>No data loss; application-specific merge logic</td>
+                  <td>Complex client code; increased read latency</td>
+                  <td>Riak, DynamoDB (shopping cart)</td>
+                </tr>
+                <tr>
+                  <td><strong>CRDTs</strong></td>
+                  <td>Use conflict-free replicated data types that can be automatically merged.</td>
+                  <td>Automatic resolution; mathematically guaranteed convergence</td>
+                  <td>Limited to specific data structures (counters, sets, maps)</td>
+                  <td>Riak 2.0 (data types)</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="info-box note">
+            <strong>Vector Clock Limitation:</strong> Vector clocks grow with the number of nodes that write to a key. In large clusters, this metadata can become significant. Solutions include (1) truncating old entries (DynamoDB uses a timestamp-based truncation), (2) using dotted version vectors (an optimization), or (3) using LWW timestamps instead (simpler but lossy).
+          </div>
+
+          <!-- 6e. Failure Handling -->
+          <h3>6e. Failure Handling</h3>
+          <p>A distributed KV store must handle three categories of failures: detecting failures, handling temporary failures, and recovering from permanent failures.</p>
+
+          <h4>Failure Detection: Gossip Protocol</h4>
+          <p>Each node periodically (every 1 second) picks a random peer and exchanges membership state. If a node hasn&rsquo;t been heard from within a timeout (e.g., 8 seconds), it is marked as suspected. After further confirmation from multiple nodes, it is marked as down.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph LR
+    subgraph NA[Node A\nHB A=47 B=31 C=28 D=19]
+        A1[ ]
+    end
+    subgraph NB[Node B\nHB A=47 B=32 C=28 D=19]
+        B1[ ]
+    end
+    subgraph NC[Node C\nHB A=45 stale B=32 C=29 D=19]
+        C1[ ]
+    end
+
+    NA -->|gossip| NB
+    NB -->|gossip| NA
+    NB -->|gossip| NC
+    NC -->|gossip| NB
+
+    ND[Node D\nHeartbeat stopped] -.->|no heartbeat 8s| SUSPECT[Mark D suspected\nConfirm with 2+ nodes\nMark D down\nTrigger hinted handoff]
+
+    style NA fill:#74b9ff,stroke:#0984e3,color:#000
+    style NB fill:#74b9ff,stroke:#0984e3,color:#000
+    style NC fill:#ffeaa7,stroke:#fdcb6e,color:#000
+    style ND fill:#ff7675,stroke:#d63031,color:#000
+    style SUSPECT fill:#fab1a0,stroke:#e17055,color:#000
+    style A1 fill:#74b9ff,stroke:#74b9ff
+    style B1 fill:#74b9ff,stroke:#74b9ff
+    style C1 fill:#ffeaa7,stroke:#ffeaa7
+          </div></div>
+
+          <h4>Temporary Failures: Sloppy Quorum &amp; Hinted Handoff</h4>
+          <p>When a replica node is temporarily down, the system uses a <strong>sloppy quorum</strong>: instead of failing the write, it sends the data to the next healthy node on the ring. That node stores a <strong>hint</strong> (a note saying &ldquo;this data belongs to node X&rdquo;). When node X recovers, the hinted data is transferred back.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+sequenceDiagram
+    participant CO as Coordinator
+    participant N1 as Node 1
+    participant N2 as Node 2
+    participant N3 as Node 3
+    participant N4 as Node 4 next on ring
+
+    Note over CO,N3: Normal Operation
+    CO->>N1: write
+    N1-->>CO: ACK
+    CO->>N2: write
+    N2-->>CO: ACK
+    CO->>N3: write
+    N3-->>CO: ACK
+
+    Note over CO,N4: N3 is temporarily down
+    CO->>N1: write
+    N1-->>CO: ACK
+    CO->>N2: write
+    N2-->>CO: ACK
+    CO-xN3: write FAILED
+    CO->>N4: write with HINT belongs to N3
+    N4-->>CO: ACK
+
+    Note over N3,N4: N3 recovers
+    N4->>N3: Transfer hinted data
+    N3-->>N4: ACK
+    Note over N4: Delete hint
+          </div></div>
+
+          <div class="info-box warning">
+            <strong>Sloppy Quorum Caveat:</strong> With sloppy quorum, W=2 does <em>not</em> guarantee strong consistency even if W+R &gt; N. The write may have gone to a hinted node outside the normal replica set. During this window, a read with R=2 might contact the original replicas (which don&rsquo;t have the latest write) and return stale data. Sloppy quorum trades consistency for availability.
+          </div>
+
+          <h4>Permanent Failures: Anti-Entropy with Merkle Trees</h4>
+          <p>When a node is permanently lost (disk failure, decommissioned), its data must be reconstructed from replicas. To efficiently detect which keys are out of sync between replicas, the system uses <strong>Merkle trees</strong> (hash trees).</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    ROOT[Root Hash\nA=0x3F2A vs B=0x7B1C\nDIFFERENT] --> HL[Hash L\nA=0x9D1E vs B=0x9D1E\nSAME - skip]
+    ROOT --> HR[Hash R\nA=0x4F2B vs B=0x8A3C\nDIFFERENT]
+    HL --> HLL[Hash LL\nK1 K2]
+    HL --> HLR[Hash LR\nK3 K4]
+    HR --> HRL[Hash RL\nA=0x1122 vs B=0x1122\nSAME]
+    HR --> HRR[Hash RR\nA=0x3344 vs B=0x5566\nDIFFERENT]
+    HRL --> K5[K5]
+    HRL --> K6[K6]
+    HRR --> K7[K7 - needs sync]
+    HRR --> K8[K8 - needs sync]
+
+    style ROOT fill:#ff7675,stroke:#d63031,color:#000
+    style HL fill:#a8e6cf,stroke:#00b894,color:#000
+    style HR fill:#ff7675,stroke:#d63031,color:#000
+    style HLL fill:#a8e6cf,stroke:#00b894,color:#000
+    style HLR fill:#a8e6cf,stroke:#00b894,color:#000
+    style HRL fill:#a8e6cf,stroke:#00b894,color:#000
+    style HRR fill:#ff7675,stroke:#d63031,color:#000
+    style K5 fill:#a8e6cf,stroke:#00b894,color:#000
+    style K6 fill:#a8e6cf,stroke:#00b894,color:#000
+    style K7 fill:#ffeaa7,stroke:#e17055,color:#000
+    style K8 fill:#ffeaa7,stroke:#e17055,color:#000
+          </div></div>
+
+          <div class="info-box note">
+            <strong>Merkle Tree Efficiency:</strong> A Merkle tree with 1 million keys at the leaves requires only ~20 hash comparisons (log<sub>2</sub> 1M &asymp; 20) to identify any discrepancy. This makes anti-entropy repair feasible even for nodes with billions of keys, as only the differing key ranges need to be transferred.
+          </div>
+
+          <!-- 6f. Write Path -->
+          <h3>6f. Write Path (Detailed)</h3>
+          <p>Here is the complete write path from client request to durable storage:</p>
+
+          <div class="flow-container">
+            <div class="flow-box">Client</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">Coordinator</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Commit Log</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Memtable</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">ACK to Client</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">SSTable Flush</div>
+          </div>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    CL[Client PUT key value] --> CO[Coordinator\nDetermines replicas via hash ring]
+    CO -->|parallel to all N replicas| WAL[1 Append to Commit Log\nSequential disk write\nEnsures durability]
+    WAL --> MT[2 Write to Memtable\nIn-memory sorted structure\nServes reads immediately]
+    MT --> ACK[3 Return ACK to Coordinator]
+    ACK -->|W=2 of N=3 ACKs| RESP[Return success to Client\nDoes NOT wait for SSTable flush]
+
+    MT -->|background when 64MB full| FREEZE[Freeze Memtable\nCreate new Memtable]
+    FREEZE --> FLUSH[Flush to SSTable on disk\nImmutable sorted by key\nIncludes index and bloom filter]
+    FLUSH -->|background| COMPACT[Compaction\nMerge SSTables\nRemove tombstones\nReduce read amplification]
+
+    style CL fill:#dfe6e9,stroke:#636e72,color:#000
+    style CO fill:#74b9ff,stroke:#0984e3,color:#000
+    style WAL fill:#a8e6cf,stroke:#00b894,color:#000
+    style MT fill:#ffe66d,stroke:#f7b731,color:#000
+    style ACK fill:#a8e6cf,stroke:#00b894,color:#000
+    style RESP fill:#55efc4,stroke:#00b894,color:#000
+    style FREEZE fill:#ffeaa7,stroke:#fdcb6e,color:#000
+    style FLUSH fill:#74b9ff,stroke:#0984e3,color:#000
+    style COMPACT fill:#b2bec3,stroke:#636e72,color:#000
+          </div></div>
+
+          <!-- 6g. Read Path -->
+          <h3>6g. Read Path (Detailed)</h3>
+          <p>The read path checks multiple data structures to find the most recent value for a key:</p>
+
+          <div class="flow-container">
+            <div class="flow-box">Client</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">Coordinator</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Memtable</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">Bloom Filter</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">SSTable Index</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">SSTable Data</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Merge &amp; Return</div>
+          </div>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    CL[Client GET key] --> CO[Coordinator\nDetermines replicas via hash ring]
+    CO -->|send to all N replicas| MT[1 Check Memtable\nCurrent and frozen\nIf found return immediately]
+    MT -->|not found| BF[2 Check Bloom Filter per SSTable\nNewest first\nDefinitely not here or Probably here]
+    BF -->|probably here| IDX[3 Check SSTable Index\nSparse index binary search\nFind data block]
+    BF -->|definitely not here| SKIP[Skip this SSTable]
+    IDX --> READ[4 Read data block from disk\nSearch for exact key\nNewest to oldest stop at first match]
+    READ --> COLLECT[5 Coordinator collects R responses\nCompare versions and timestamps]
+    COLLECT --> RETURN[Return latest version to Client]
+    COLLECT -->|stale replicas detected| REPAIR[Read Repair background\nSend latest version to stale replicas]
+
+    style CL fill:#dfe6e9,stroke:#636e72,color:#000
+    style CO fill:#74b9ff,stroke:#0984e3,color:#000
+    style MT fill:#ffe66d,stroke:#f7b731,color:#000
+    style BF fill:#a8e6cf,stroke:#00b894,color:#000
+    style IDX fill:#74b9ff,stroke:#0984e3,color:#000
+    style SKIP fill:#b2bec3,stroke:#636e72,color:#000
+    style READ fill:#74b9ff,stroke:#0984e3,color:#000
+    style COLLECT fill:#ffeaa7,stroke:#fdcb6e,color:#000
+    style RETURN fill:#55efc4,stroke:#00b894,color:#000
+    style REPAIR fill:#fab1a0,stroke:#e17055,color:#000
+          </div></div>
+
+          <h4>Bloom Filter Deep Dive</h4>
+          <p>Bloom filters are critical for read performance. Without them, a read for a non-existent key would need to check every SSTable on disk.</p>
+
+<pre><code>Bloom Filter Properties:
+  - Space: ~10 bits per key (1.25 bytes per key)
+  - False positive rate: ~1% with 10 bits/key and 7 hash functions
+  - False negatives: IMPOSSIBLE (if bloom filter says "no", key is definitely not there)
+  - Time: O(k) where k = number of hash functions (constant, typically 7)
+
+Example:
+  SSTable with 1M keys → Bloom filter = 1.25 MB
+  10 SSTables → 12.5 MB of bloom filters (easily fits in RAM)
+  
+  Without bloom filter: 10 disk reads per miss
+  With bloom filter: 0.1 disk reads per miss (99% filtered out)</code></pre>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> The write path and read path are the most commonly asked follow-up questions for KV store design. Be prepared to walk through each step. Key points to emphasize: (1) commit log ensures durability, (2) memtable enables fast writes, (3) bloom filters prevent unnecessary disk reads, (4) read repair heals inconsistencies passively.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- TRADE-OFFS -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="tradeoffs"></span>
+        <section class="section">
+          <h2>7. Trade-offs</h2>
+
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Decision</th>
+                  <th>Option A</th>
+                  <th>Option B</th>
+                  <th>Recommendation</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>Strong vs Eventual Consistency</strong></td>
+                  <td><strong>Strong (W+R&gt;N):</strong> Every read returns the latest write. Higher latency (must wait for quorum). Lower availability during partitions.</td>
+                  <td><strong>Eventual (W=1, R=1):</strong> Reads may return stale data. Lowest latency. Highest availability. Conflicts must be resolved.</td>
+                  <td>Default to <strong>quorum (W=2, R=2, N=3)</strong> for a good balance. Offer tunable consistency so clients can choose per-request based on their needs.</td>
+                </tr>
+                <tr>
+                  <td><strong>LSM-Tree vs B-Tree</strong></td>
+                  <td><strong>LSM-Tree:</strong> Excellent write throughput (sequential I/O). Higher read amplification. Background compaction uses CPU/I/O. Space amplification during compaction.</td>
+                  <td><strong>B-Tree:</strong> Excellent read performance (single lookup). Write amplification from in-place updates. No compaction overhead. More predictable latency.</td>
+                  <td>Use <strong>LSM-Tree</strong> for write-heavy distributed KV stores (Cassandra, DynamoDB). Use B-Tree for read-heavy, single-node databases (PostgreSQL, MySQL).</td>
+                </tr>
+                <tr>
+                  <td><strong>In-Memory vs Disk-Based</strong></td>
+                  <td><strong>In-memory (Redis):</strong> Sub-millisecond latency. Limited by RAM capacity. Data loss risk without persistence. Expensive at scale.</td>
+                  <td><strong>Disk-based (Cassandra):</strong> Higher latency (1&ndash;10ms). Virtually unlimited capacity. Durable by default. Cost-effective for large datasets.</td>
+                  <td>Use <strong>disk-based with memory caching</strong> for a general-purpose KV store. Use in-memory for caching layers or latency-critical hot data.</td>
+                </tr>
+                <tr>
+                  <td><strong>Single-Leader vs Leaderless</strong></td>
+                  <td><strong>Single-leader (per partition):</strong> Strong consistency is straightforward. Leader is a bottleneck and SPOF. Failover adds latency. Used by HBase, MongoDB.</td>
+                  <td><strong>Leaderless:</strong> Any node accepts writes. Higher availability. Conflicts possible. More complex consistency. Used by Cassandra, DynamoDB, Riak.</td>
+                  <td>Use <strong>leaderless</strong> for AP systems prioritizing availability. Use single-leader for CP systems where strong consistency is non-negotiable.</td>
+                </tr>
+                <tr>
+                  <td><strong>Vector Clocks vs LWW Timestamps</strong></td>
+                  <td><strong>Vector clocks:</strong> Detect true conflicts (concurrent writes). No data loss. Growing metadata overhead. Complex client-side resolution.</td>
+                  <td><strong>Last-Write-Wins (LWW):</strong> Simple timestamp comparison. No conflict resolution needed. Silent data loss on concurrent writes. Clock skew issues.</td>
+                  <td>Use <strong>LWW</strong> for simplicity when occasional data loss is acceptable (Cassandra default). Use <strong>vector clocks</strong> when every write matters (shopping carts, collaborative editing).</td>
+                </tr>
+                <tr>
+                  <td><strong>Gossip vs Centralized Coordination</strong></td>
+                  <td><strong>Gossip protocol:</strong> No SPOF. Eventually consistent membership. O(log N) convergence time. Simple to implement. Used by Cassandra, DynamoDB.</td>
+                  <td><strong>ZooKeeper/etcd:</strong> Strongly consistent membership. Immediate convergence. Additional infrastructure dependency. SPOF if coordination service fails.</td>
+                  <td>Use <strong>gossip</strong> for AP systems (consistent with the leaderless philosophy). Use ZooKeeper for CP systems or when strong membership consistency is required.</td>
+                </tr>
+                <tr>
+                  <td><strong>Compaction Strategy</strong></td>
+                  <td><strong>Size-tiered (STCS):</strong> Merge SSTables of similar size. Better write throughput. Higher space amplification (up to 2x). Good for write-heavy workloads.</td>
+                  <td><strong>Leveled (LCS):</strong> Maintain non-overlapping key ranges per level. Better read performance. Higher write amplification. More predictable space usage.</td>
+                  <td>Use <strong>size-tiered</strong> for write-heavy workloads (logging, time-series). Use <strong>leveled</strong> for read-heavy workloads (user profiles, product catalog).</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> The strongest candidates don&rsquo;t just list trade-offs &mdash; they connect them to real systems. &ldquo;Cassandra uses LWW because most of its use cases (time-series, logging) are append-heavy and idempotent, so losing a concurrent write is rarely a problem. DynamoDB&rsquo;s original shopping cart use case required vector clocks because merging two carts is better than losing items.&rdquo;
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- REVISION CHECKLIST -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="revision"></span>
+        <section class="section">
+          <h2>8. Revision Checklist</h2>
+          <p>Use this checklist to verify you can recall the key concepts before your interview.</p>
+
+          <div class="checklist">
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>A distributed KV store provides <code>put(key, value)</code>, <code>get(key)</code>, and <code>delete(key)</code> operations with tunable consistency, automatic partitioning, and replication across nodes for fault tolerance.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>The CAP theorem forces a choice between CP and AP. AP systems (Cassandra, DynamoDB) prioritize availability and accept eventual consistency. CP systems (HBase, MongoDB) prioritize consistency and may reject requests during partitions.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>Data is partitioned using <strong>consistent hashing with virtual nodes</strong> (100&ndash;200 vnodes per server). Adding/removing a node only redistributes ~K/N keys. Each key is replicated to the next N&minus;1 distinct physical nodes clockwise on the ring.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>Quorum consensus: with N replicas, W write acks, and R read acks, <strong>W + R &gt; N</strong> guarantees strong consistency because at least one node in the read set has the latest write. Common config: N=3, W=2, R=2.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>Conflict resolution strategies: <strong>Last-Write-Wins</strong> (simple, lossy &mdash; Cassandra), <strong>vector clocks</strong> (detects true conflicts &mdash; DynamoDB/Riak), and <strong>CRDTs</strong> (automatic merge for specific data types &mdash; Riak 2.0).</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>Failure detection uses the <strong>gossip protocol</strong>: nodes exchange heartbeat counters with random peers every ~1 second. A node is marked down after its heartbeat hasn&rsquo;t incremented for a timeout period and multiple peers confirm.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>Temporary failures are handled with <strong>sloppy quorum + hinted handoff</strong>: writes go to the next healthy node on the ring, which stores a hint and forwards the data when the failed node recovers.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>Permanent failures are repaired with <strong>anti-entropy using Merkle trees</strong>: nodes compare hash trees to efficiently identify exactly which keys are out of sync, requiring only O(log N) hash comparisons instead of comparing all keys.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Write path:</strong> Client &rarr; Coordinator &rarr; Commit log (durability) &rarr; Memtable (in-memory, sorted) &rarr; ACK to client &rarr; Background flush to SSTable on disk.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Read path:</strong> Check memtable &rarr; Check bloom filter per SSTable (skip if &ldquo;definitely not here&rdquo;) &rarr; SSTable index lookup &rarr; Read data block &rarr; Merge results from newest to oldest &rarr; Read repair stale replicas.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>LSM-trees are preferred over B-trees for distributed KV stores because writes are sequential (fast), the append-only commit log ensures durability, and compaction naturally handles tombstone cleanup. Trade-off: higher read amplification.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>Deletes use <strong>tombstones</strong> (not physical removal) to prevent deleted data from being resurrected by a replica that missed the delete. Tombstones are garbage-collected after a grace period (e.g., 10 days).</span>
+            </label>
+          </div>
+        </section>
+
+        <!-- Bottom nav -->
+        <div class="problem-nav">
+          <a href="consistent-hashing.html"><span class="nav-label">Previous</span><span class="nav-title">Consistent Hashing</span></a>
+          <a href="notification-system.html" class="next"><span class="nav-label">Next</span><span class="nav-title">Notification System</span></a>
+        </div>
+      </div>
+    </div>
+  </main>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script>mermaid.initialize({startOnLoad:true, theme:'default'});</script>
+  <script src="../js/app.js"></script>
+</body>
+</html>

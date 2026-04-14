@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Design a Data Lakehouse — HLD Interview Prep</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+  <nav class="top-nav">
+    <div class="top-nav-inner">
+      <a href="../index.html" class="nav-logo">
+        <div class="nav-logo-icon">SD</div>
+        <span>HLD Interview Prep</span>
+      </a>
+      <div class="nav-actions">
+        <div class="nav-breadcrumb">
+          <a href="../index.html">Home</a>
+          <span class="separator">/</span>
+          <span class="current">Data Lakehouse</span>
+        </div>
+        <button class="theme-toggle" id="theme-toggle">&#x263E;</button>
+      </div>
+    </div>
+  </nav>
+  <div class="scroll-progress"></div>
+
+  <main class="main-content">
+    <div class="problem-page">
+      <aside class="sidebar">
+        <div class="sidebar-title">On This Page</div>
+        <ul class="toc-list">
+          <li><a href="#requirements">Requirements</a></li>
+          <li><a href="#estimation">Capacity Estimation</a></li>
+          <li><a href="#api-design">API Design</a></li>
+          <li><a href="#data-model">Data Model</a></li>
+          <li><a href="#high-level-design">High-Level Design</a></li>
+          <li><a href="#deep-dive">Deep Dive</a></li>
+          <li><a href="#tradeoffs">Trade-offs</a></li>
+          <li><a href="#revision">Revision Checklist</a></li>
+        </ul>
+        <div class="progress-bar"><div class="progress-fill" style="width: 0%"></div></div>
+      </aside>
+
+      <div class="problem-content">
+        <div class="problem-header">
+          <h1>Design a Data Lakehouse</h1>
+          <p class="problem-subtitle">Design a unified data platform that combines the best of data lakes (low-cost object storage, schema flexibility) and data warehouses (ACID transactions, SQL queries, performance) — the architecture behind Databricks Lakehouse, Apache Iceberg, and Delta Lake.</p>
+          <div class="problem-meta-bar">
+            <span class="meta-badge difficulty-hard">Hard</span>
+            <span class="meta-badge">Data Platform</span>
+            <span class="meta-badge">Asked at: Databricks, Snowflake, Netflix</span>
+          </div>
+        </div>
+
+        <span class="section-anchor" id="requirements"></span>
+        <section class="section">
+          <h2>1. Requirements</h2>
+
+          <h3>Functional Requirements</h3>
+          <ul class="content-list">
+            <li><strong>ACID transactions on object storage</strong> — Support concurrent reads and writes on Parquet files stored in S3/GCS with full ACID guarantees (atomicity, consistency, isolation, durability).</li>
+            <li><strong>Schema evolution</strong> — Tables can evolve their schema (add columns, rename, reorder) without rewriting existing data. Readers see a consistent view.</li>
+            <li><strong>Time travel</strong> — Query data as of any previous version. Enables auditing, debugging, and reproducible ML training.</li>
+            <li><strong>SQL queries</strong> — Support standard SQL queries with query planning and optimization. Queries run against the latest committed version of the table.</li>
+            <li><strong>Streaming ingestion</strong> — Ingest real-time data streams (Kafka) with exactly-once semantics and low-latency queryability.</li>
+          </ul>
+
+          <h3>Non-Functional Requirements</h3>
+          <ul class="content-list">
+            <li><strong>Scale:</strong> Support petabytes of data, billions of rows per table, thousands of concurrent queries.</li>
+            <li><strong>Performance:</strong> Interactive queries (&lt;10 seconds) on recent data. Full scans of historical data in minutes.</li>
+            <li><strong>Cost efficiency:</strong> Store data on cheap object storage ($0.023/GB/month for S3) rather than expensive SSDs.</li>
+            <li><strong>Open format:</strong> Data stored in open formats (Parquet) so it's not locked to a single vendor.</li>
+          </ul>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> This is the most Databricks-specific question you can get. The core insight is: how do you get ACID transactions on eventually-consistent object storage like S3? The answer is a transaction log (Delta Log / Iceberg metadata) that serializes all commits as ordered JSON files. The log is the single source of truth; Parquet files are just data.
+          </div>
+        </section>
+
+        <span class="section-anchor" id="estimation"></span>
+        <section class="section">
+          <h2>2. Capacity Estimation</h2>
+
+          <h3>Assumptions</h3>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr><th>Parameter</th><th>Value</th><th>Notes</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>Total data</td><td>10 PB</td><td>Across all tables</td></tr>
+                <tr><td>Ingestion rate</td><td>100 TB/day</td><td>Streaming + batch</td></tr>
+                <tr><td>Concurrent queries</td><td>5,000</td><td>Interactive + batch</td></tr>
+                <tr><td>Commits per second</td><td>1,000</td><td>Across all tables</td></tr>
+                <tr><td>Tables</td><td>1 million</td><td>Many small tables + some huge ones</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+<pre><code>Storage (S3):
+  Total data              = 10 PB
+  Monthly S3 cost         = 10M GB × $0.023 = $230,000/month
+  
+Transaction Log:
+  Commits per day         = 1,000 × 86,400 = 86M commits/day
+  Per commit metadata     = ~2 KB (file list, schema, stats)
+  Daily log storage       = 86M × 2 KB = 172 GB/day
+  
+Query throughput:
+  Concurrent queries      = 5,000
+  Average scan            = 10 GB (with pruning: 1 GB actual)
+  Need cluster of ~500 executors for interactive queries</code></pre>
+        </section>
+
+        <span class="section-anchor" id="api-design"></span>
+        <section class="section">
+          <h2>3. API Design</h2>
+
+          <div class="api-endpoint">
+            <div class="api-endpoint-header">
+              <span class="api-method post">SQL</span>
+              <span class="api-path">CREATE TABLE / INSERT / SELECT / MERGE</span>
+            </div>
+            <div class="api-endpoint-body">
+              <p>Standard SQL interface for all operations:</p>
+<pre><code>-- Create a table (stored as Parquet in S3)
+CREATE TABLE events (
+  event_id BIGINT,
+  user_id BIGINT,
+  event_type STRING,
+  properties MAP&lt;STRING, STRING&gt;,
+  event_time TIMESTAMP
+) USING delta
+LOCATION 's3://lakehouse/events/'
+
+-- Streaming ingestion with exactly-once
+INSERT INTO events
+SELECT * FROM kafka_source
+WHERE batch_id = {current_batch}
+
+-- Time travel query
+SELECT * FROM events VERSION AS OF 42
+SELECT * FROM events TIMESTAMP AS OF '2024-01-15 10:00:00'
+
+-- Schema evolution
+ALTER TABLE events ADD COLUMN device_type STRING AFTER user_id</code></pre>
+            </div>
+          </div>
+        </section>
+
+        <span class="section-anchor" id="data-model"></span>
+        <section class="section">
+          <h2>4. Data Model</h2>
+
+          <div class="diagram-box"><pre>
+┌─────────────────────────────────────────────────────────────────────┐
+│                TRANSACTION LOG (_delta_log/)                        │
+│                                                                     │
+│  s3://bucket/table/_delta_log/00000000000000000000.json            │
+│  s3://bucket/table/_delta_log/00000000000000000001.json            │
+│  s3://bucket/table/_delta_log/00000000000000000002.json            │
+│  ...                                                                │
+│  s3://bucket/table/_delta_log/00000000000000000099.checkpoint.json │
+│  s3://bucket/table/_delta_log/00000000000000000100.json            │
+│                                                                     │
+│  Each JSON file = one commit                                        │
+│  Checkpoints = periodic snapshots of all commits up to that point   │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                    COMMIT JSON STRUCTURE                            │
+├──────────────┬──────────────────────────────────────────────────────┤
+│ commitInfo   │ { "timestamp": ..., "operation": "WRITE", ... }     │
+│ add          │ { "path": "part-00001.parquet",                     │
+│              │   "size": 134217728,                                │
+│              │   "dataChange": true,                               │
+│              │   "stats": { "numRows": 1000000,                   │
+│              │     "minValues": { "user_id": 1 },                  │
+│              │     "maxValues": { "user_id": 999999 } } }          │
+│ remove       │ { "path": "part-00000.parquet", "deletionTime": ... }│
+│ metaData     │ { "schema": { "fields": [...] }, ... }             │
+│ protocol     │ { "minReaderVersion": 1, "minWriterVersion": 2 }   │
+└──────────────┴──────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                  DATA FILES (Parquet in S3)                         │
+│                                                                     │
+│  s3://bucket/table/year=2024/month=01/part-00001.parquet          │
+│  s3://bucket/table/year=2024/month=01/part-00002.parquet          │
+│  s3://bucket/table/year=2024/month=02/part-00001.parquet          │
+│  ...                                                                │
+│                                                                     │
+│  Partitioned by date for efficient pruning                          │
+│  Each file: 128MB (compaction target)                               │
+└─────────────────────────────────────────────────────────────────────┘
+          </pre></div>
+        </section>
+
+        <span class="section-anchor" id="high-level-design"></span>
+        <section class="section">
+          <h2>5. High-Level Design</h2>
+
+          <h3>Architecture Overview</h3>
+          <div class="mermaid-container">
+            <div class="mermaid-title">Data Lakehouse Architecture</div>
+            <div class="mermaid">
+graph TD
+    STREAM[Kafka Streams] --> INGEST[Ingestion Service]
+    BATCH[Batch Sources] --> INGEST
+    INGEST --> S3[S3 Object Storage]
+    INGEST --> LOG[Transaction Log]
+    SQL[SQL Queries] --> PLANNER[Query Planner]
+    PLANNER --> LOG
+    PLANNER --> OPT[File Pruning &amp; Stats]
+    OPT --> S3
+    S3 --> EXEC[Spark Executors]
+    EXEC --> RESULTS[Results]
+    LOG --> CHECKPOINT[Checkpoint Service]
+            </div>
+          </div>
+
+          <h3>ACID Transaction Flow</h3>
+          <div class="mermaid-container">
+            <div class="mermaid-title">Write Transaction (Optimistic Concurrency)</div>
+            <div class="mermaid">
+graph TD
+    W1[Writer A reads current version: 42] --> W2[Writer A writes Parquet files to S3]
+    W2 --> W3[Writer A attempts to commit: 000043.json]
+    W3 --> LOCK{Acquire commit lock}
+    LOCK -->|Got lock| VERIFY{Version still 42?}
+    VERIFY -->|Yes| COMMIT[Write 000043.json, release lock]
+    VERIFY -->|No| CONFLICT[Conflict! Retry from new version]
+    LOCK -->|Lock held| WAIT[Wait and retry]
+            </div>
+          </div>
+
+          <div class="info-box note">
+            <strong>Why Optimistic Concurrency?</strong> S3 doesn't support locks, so we use optimistic concurrency control (OCC). Writers read the latest version, do their work, then try to commit. If another writer committed first (version changed), the writer must retry. This works well because most writes are to different partitions and rarely conflict. When they do conflict, the retry is cheap (just re-commit the files with the new version number).
+          </div>
+        </section>
+
+        <span class="section-anchor" id="deep-dive"></span>
+        <section class="section">
+          <h2>6. Deep Dive</h2>
+
+          <h3>Data Skipping with Statistics</h3>
+          <p>Each commit JSON includes min/max statistics for every column in every file. When a query includes a WHERE clause, the planner reads these statistics to skip files that cannot contain matching data.</p>
+
+<pre><code>-- Query: SELECT * FROM events WHERE user_id = 42
+
+-- Planner reads commit log:
+-- File 1: min(user_id)=1,   max(user_id)=100   → INCLUDE (42 is in range)
+-- File 2: min(user_id)=200, max(user_id)=300   → SKIP
+-- File 3: min(user_id)=10,  max(user_id)=50    → INCLUDE
+
+-- Result: Only 2 of 3 files scanned = 33% I/O savings</code></pre>
+
+          <h3>Compaction &amp; Z-Ordering</h3>
+          <div class="mermaid-container">
+            <div class="mermaid-title">File Compaction Process</div>
+            <div class="mermaid">
+graph TD
+    S1[Small Files: 10MB each] --> COMPACT[Compaction Job]
+    COMPACT --> L1[Large Files: 128MB each]
+    L1 --> ZORDER[Z-Order by (user_id, event_time)]
+    ZORDER --> OPTIMIZED[Optimized Files]
+    OPTIMIZED --> COMMIT2[New commit in log]
+            </div>
+          </div>
+
+          <h3>Checkpoints for Fast Startup</h3>
+          <p>Without checkpoints, a reader would need to replay all 10 million commit JSON files to determine the current state. Checkpoints are periodic snapshots (every 10 commits) that aggregate all changes into a single file. A reader loads the latest checkpoint + any commits after it.</p>
+        </section>
+
+        <span class="section-anchor" id="tradeoffs"></span>
+        <section class="section">
+          <h2>7. Trade-offs</h2>
+
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr><th>Decision</th><th>Option A</th><th>Option B</th><th>Recommendation</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>Table Format</strong></td>
+                  <td><strong>Delta Lake:</strong> Transaction log as ordered JSON. Simple. Databricks-native. Large log growth without checkpoints.</td>
+                  <td><strong>Apache Iceberg:</strong> Manifest files + metadata layers. More complex. Better for multi-engine access (Spark, Trino, Flink).</td>
+                  <td>Both are viable. <strong>Delta Lake</strong> for Databricks-centric workloads. <strong>Iceberg</strong> for multi-engine environments. The concepts are similar.</td>
+                </tr>
+                <tr>
+                  <td><strong>File Size</strong></td>
+                  <td><strong>Large files (128MB+):</strong> Fewer S3 requests. Better scan throughput. Higher write latency (must buffer).</td>
+                  <td><strong>Small files (10MB):</strong> Lower write latency. More S3 requests. Compaction overhead.</td>
+                  <td>Use <strong>small files for streaming writes</strong> (low latency), then <strong>compact to 128MB</strong> in background jobs. Best of both worlds.</td>
+                </tr>
+                <tr>
+                  <td><strong>Isolation Level</strong></td>
+                  <td><strong>Serializable:</strong> Strongest. Writers always conflict-check. Lower throughput.</td>
+                  <td><strong>Snapshot isolation:</strong> Readers see consistent snapshot. Writers only conflict on same files. Higher throughput.</td>
+                  <td>Use <strong>snapshot isolation</strong> (default in Delta/Iceberg). Most workloads don't need serializable. Writers only conflict if they modify the same files.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <span class="section-anchor" id="revision"></span>
+        <section class="section">
+          <h2>8. Revision Checklist</h2>
+          <p>Use this checklist to verify you can recall the key concepts before your interview.</p>
+
+          <div class="checklist">
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Transaction log is the source of truth:</strong> Parquet files are just data. The ordered JSON commit log (_delta_log/) defines what files are part of the table, their schema, and statistics. To read a table, read the log first.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Optimistic concurrency on S3:</strong> Writers read the latest version, write data files, then try to commit. If version changed (another writer committed), retry. Works because most writes target different partitions.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Data skipping via statistics:</strong> Each commit stores min/max per column per file. Queries with WHERE clauses skip files whose ranges don't match. Can reduce I/O by 10-100x.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Checkpoints prevent log replay:</strong> Every N commits, aggregate all changes into a checkpoint file. New readers load checkpoint + recent commits instead of replaying millions of JSON files.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Time travel via version:</strong> Each commit has a sequential version number. To query "as of version 42", the reader loads the log up to version 42 and reads only the files that were active at that version. Old files are retained for the retention period.</span>
+            </label>
+          </div>
+        </section>
+
+        <div class="problem-nav">
+          <a href="workflow-orchestration.html"><span class="nav-label">Previous</span><span class="nav-title">Workflow Orchestration</span></a>
+          <a href="url-shortener.html" class="next"><span class="nav-label">Next</span><span class="nav-title">URL Shortener</span></a>
+        </div>
+      </div>
+    </div>
+  </main>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script src="../js/app.js"></script>
+</body>
+</html>

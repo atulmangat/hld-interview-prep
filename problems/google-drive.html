@@ -1,0 +1,1555 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Design Google Drive — HLD Interview Prep</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+  <nav class="top-nav">
+    <div class="top-nav-inner">
+      <a href="../index.html" class="nav-logo">
+        <div class="nav-logo-icon">SD</div>
+        <span>HLD Interview Prep</span>
+      </a>
+      <div class="nav-actions">
+        <div class="nav-breadcrumb">
+          <a href="../index.html">Home</a>
+          <span class="separator">/</span>
+          <span class="current">Google Drive</span>
+        </div>
+        <button class="theme-toggle" id="theme-toggle">&#x263E;</button>
+      </div>
+    </div>
+  </nav>
+  <div class="scroll-progress"></div>
+
+  <main class="main-content">
+    <div class="problem-page">
+      <!-- Sidebar TOC -->
+      <aside class="sidebar">
+        <div class="sidebar-title">On This Page</div>
+        <ul class="toc-list">
+          <li><a href="#requirements">Requirements</a></li>
+          <li><a href="#estimation">Capacity Estimation</a></li>
+          <li><a href="#api-design">API Design</a></li>
+          <li><a href="#data-model">Data Model</a></li>
+          <li><a href="#high-level-design">High-Level Design</a></li>
+          <li><a href="#deep-dive">Deep Dive</a></li>
+          <li><a href="#tradeoffs">Trade-offs</a></li>
+          <li><a href="#revision">Revision Checklist</a></li>
+        </ul>
+        <div class="progress-bar"><div class="progress-fill" style="width: 0%"></div></div>
+      </aside>
+
+      <div class="problem-content">
+        <!-- Header -->
+        <div class="problem-header">
+          <h1>Design Google Drive</h1>
+          <p class="problem-subtitle">Design a cloud file storage and synchronization service that supports file upload and download, real-time sync across multiple devices, file sharing with granular permissions, file versioning with rollback, offline editing with conflict resolution, and change notifications &mdash; all at the scale of 500 million registered users with 100 million daily active users and 10+ petabytes of stored data.</p>
+          <div class="problem-meta-bar">
+            <span class="meta-badge difficulty-hard">Hard</span>
+            <span class="meta-badge">Storage &amp; Data</span>
+            <span class="meta-badge">Asked at: Google, Dropbox, Microsoft</span>
+          </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- REQUIREMENTS -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="requirements"></span>
+        <section class="section">
+          <h2>1. Requirements</h2>
+
+          <h3>Functional Requirements</h3>
+          <ul class="content-list">
+            <li><strong>Upload and download files</strong> &mdash; Users can upload files of any type and size (documents, images, videos, archives). Large files support resumable uploads. Users can download any file they have access to. The system stores the original file with full fidelity.</li>
+            <li><strong>File sync across devices</strong> &mdash; Changes made on one device are automatically propagated to all other devices linked to the same account. Sync must be near-real-time (within seconds) and bandwidth-efficient, transferring only the changed portions of a file rather than the entire file.</li>
+            <li><strong>File sharing with permissions</strong> &mdash; Users can share files and folders with other users or groups. Permissions are granular: viewer (read-only), commenter (read + comment), editor (read + write). Users can generate shareable links with optional expiration and password protection.</li>
+            <li><strong>File versioning</strong> &mdash; The system maintains a history of all changes to a file. Users can view previous versions, compare changes, and restore any earlier version. Versions are retained for at least 30 days (or longer for paid plans).</li>
+            <li><strong>Offline editing</strong> &mdash; Users can mark files for offline access. Changes made while offline are queued locally and synchronized when the device reconnects. The system handles conflicts when the same file is edited offline on multiple devices.</li>
+            <li><strong>Notifications on changes</strong> &mdash; Users receive real-time notifications when files they own or have access to are modified, shared, or commented on. Notifications are delivered via push notification, email, or in-app alerts based on user preferences.</li>
+          </ul>
+
+          <h3>Non-Functional Requirements</h3>
+          <ul class="content-list">
+            <li><strong>Massive scale:</strong> 500 million registered users, 100 million daily active users. Average of 200 files per user. 15 GB free storage per user. The system must handle extreme metadata read/write loads and petabytes of stored file data.</li>
+            <li><strong>Reliability (zero data loss):</strong> Once a file is uploaded and confirmed, it must never be lost. Files are stored with 99.999999999% (11 nines) durability using replicated object storage. This is the single most important non-functional requirement &mdash; users trust the system with irreplaceable data.</li>
+            <li><strong>Low-latency sync:</strong> File changes must propagate to other devices within 5 seconds under normal conditions. The sync protocol must be bandwidth-efficient, using delta sync (only transfer changed blocks) rather than full-file transfer.</li>
+            <li><strong>High availability:</strong> The service must be available 99.9% of the time (8.7 hours downtime/year). File access and download must work even during partial system failures. Upload can tolerate slightly higher latency during degraded states.</li>
+            <li><strong>Strong consistency for metadata:</strong> File metadata (name, path, permissions, version history) must be strongly consistent. If a user renames a file on device A, device B must see the new name &mdash; never a stale name. Eventual consistency for metadata leads to data corruption (e.g., two devices writing to different paths).</li>
+            <li><strong>Bandwidth efficiency:</strong> With 100M DAU syncing files, the system must minimize bandwidth usage through block-level deduplication, delta sync, and compression. This reduces both infrastructure cost and sync time for users on slow connections.</li>
+          </ul>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> Start by clarifying scope: &ldquo;Are we designing the full Google Drive experience (Docs, Sheets, collaborative editing), or focusing on the file storage and sync engine?&rdquo; In a 45-minute interview, focus on the <strong>sync engine</strong> and <strong>block storage architecture</strong> &mdash; these are the technically interesting parts. Collaborative real-time editing (Google Docs) is a separate system (OT/CRDT-based) and should be called out as out of scope. Also ask: &ldquo;Should we support mobile, desktop, and web clients?&rdquo; The sync agent on desktop is fundamentally different from the web client (desktop has a local filesystem cache; web does not).
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- ESTIMATION -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="estimation"></span>
+        <section class="section">
+          <h2>2. Capacity Estimation</h2>
+
+          <h3>Assumptions</h3>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Parameter</th>
+                  <th>Value</th>
+                  <th>Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Registered users</td>
+                  <td>500 million</td>
+                  <td>Google Drive / Dropbox scale</td>
+                </tr>
+                <tr>
+                  <td>Daily Active Users (DAU)</td>
+                  <td>100 million</td>
+                  <td>~20% of registered users</td>
+                </tr>
+                <tr>
+                  <td>Average files per user</td>
+                  <td>200</td>
+                  <td>Mix of documents, images, and media</td>
+                </tr>
+                <tr>
+                  <td>Average file size</td>
+                  <td>100 KB</td>
+                  <td>Weighted average (many small docs, fewer large media files)</td>
+                </tr>
+                <tr>
+                  <td>Free storage per user</td>
+                  <td>15 GB</td>
+                  <td>Google Drive free tier</td>
+                </tr>
+                <tr>
+                  <td>File changes per DAU per day</td>
+                  <td>2</td>
+                  <td>Create, edit, or rename a file</td>
+                </tr>
+                <tr>
+                  <td>Average devices per user</td>
+                  <td>3</td>
+                  <td>Laptop, phone, tablet/work machine</td>
+                </tr>
+                <tr>
+                  <td>Average block size</td>
+                  <td>4 MB</td>
+                  <td>Dropbox-style block-level sync</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>Sync Operations</h3>
+<pre><code>Sync operations per day:
+  DAU                    = 100 million
+  File changes per user  = 2 / day
+  Total sync ops/day     = 100M &times; 2 = 200 million / day
+
+Sync operations per second:
+  200M / 86,400          &asymp; 2,315 ops/sec (average)
+  Peak (3x)              &asymp; 6,945 ops/sec
+
+Each sync operation triggers:
+  1. Metadata update (DB write)
+  2. Block upload/download (if content changed)
+  3. Notification to other devices (push)
+  Total downstream operations &asymp; 3x = ~7,000 ops/sec avg, ~21,000 peak</code></pre>
+
+          <h3>Storage Calculation</h3>
+<pre><code>Total stored files:
+  500M users &times; 200 files/user = 100 billion files
+
+Total stored data:
+  100 billion files &times; 100 KB avg = 10 PB (petabytes)
+
+With deduplication (estimated 30% dedup ratio):
+  Effective storage = 10 PB &times; 0.7 = 7 PB
+
+Daily new data:
+  200M file changes/day &times; 100 KB avg = 20 TB/day
+  With delta sync (only changed blocks):
+  Effective daily transfer &asymp; 20 TB &times; 0.3 = 6 TB/day
+  (Most edits change only a small portion of the file)
+
+Metadata storage:
+  100 billion files &times; 1 KB metadata/file = 100 TB metadata
+  (file name, path, hash, permissions, version pointers)</code></pre>
+
+          <h3>Bandwidth Calculation</h3>
+<pre><code>Upload bandwidth:
+  200M file changes/day &times; 100 KB avg = 20 TB/day
+  With delta sync: ~6 TB/day upload
+  = 6 TB / 86,400 sec &asymp; 70 MB/sec avg upload
+
+Download bandwidth (sync to other devices):
+  Each change syncs to avg 2 other devices
+  = 6 TB/day &times; 2 = 12 TB/day download
+  = 12 TB / 86,400 sec &asymp; 140 MB/sec avg download
+
+Total bandwidth: ~210 MB/sec avg, ~630 MB/sec peak</code></pre>
+
+          <div class="info-box note">
+            <strong>Key Insight:</strong> The numbers reveal that Google Drive is a <strong>metadata-heavy system</strong>, not a bandwidth-heavy one. With 100 billion files but only ~2,300 sync ops/sec, the challenge is not raw throughput but rather <strong>metadata consistency</strong> (100 TB of metadata that must be strongly consistent), <strong>efficient delta sync</strong> (transferring only changed blocks saves 70% bandwidth), and <strong>reliable storage</strong> (10 PB with 11-nines durability). Compare this to YouTube, which is bandwidth-dominated (262 PB/day egress). Google Drive&rsquo;s architecture must optimize for metadata operations and sync protocol efficiency, not raw data throughput.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- API DESIGN -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="api-design"></span>
+        <section class="section">
+          <h2>3. API Design</h2>
+
+          <p>The Google Drive API has two categories: <strong>file operations</strong> (upload, download, metadata) and <strong>collaboration operations</strong> (sharing, versioning). Upload uses presigned URLs for large files. Sync is handled via a dedicated notification channel (long polling or WebSocket).</p>
+
+          <div class="api-endpoint">
+            <div class="api-endpoint-header">
+              <span class="api-method post">POST</span>
+              <span class="api-path">/api/v1/files/upload</span>
+            </div>
+            <div class="api-endpoint-body">
+              <p>Upload a new file or update an existing file&rsquo;s content. For small files (&lt;5 MB), the file is sent inline. For large files, the server returns a presigned URL for direct-to-storage upload. The file is split into 4 MB blocks on the client, each block is hashed, and only new/changed blocks are uploaded (delta sync).</p>
+<pre><code>Request:
+  POST /api/v1/files/upload
+  Headers:
+    Content-Type: application/json
+    Authorization: Bearer &lt;user-token&gt;
+  Body:
+  {
+    "file_name": "quarterly-report.pdf",
+    "parent_id": "folder_abc123",
+    "file_size": 15728640,             // 15 MB
+    "content_hash": "sha256:a1b2c3...",
+    "blocks": [
+      {"index": 0, "hash": "sha256:block0hash", "size": 4194304},
+      {"index": 1, "hash": "sha256:block1hash", "size": 4194304},
+      {"index": 2, "hash": "sha256:block2hash", "size": 4194304},
+      {"index": 3, "hash": "sha256:block3hash", "size": 3145728}
+    ]
+  }
+
+Response (200 OK):
+{
+  "file_id": "file_xyz789",
+  "version": 1,
+  "upload_urls": [
+    {"index": 0, "url": "https://storage.example.com/blocks/block0hash?sig=..."},
+    {"index": 2, "url": "https://storage.example.com/blocks/block2hash?sig=..."}
+  ],
+  "blocks_already_stored": [1, 3],
+  "status": "awaiting_blocks"
+}
+
+// Note: blocks 1 and 3 already exist in storage (deduplication).
+// Client only needs to upload blocks 0 and 2.</code></pre>
+            </div>
+          </div>
+
+          <div class="api-endpoint">
+            <div class="api-endpoint-header">
+              <span class="api-method get">GET</span>
+              <span class="api-path">/api/v1/files/{file_id}/download</span>
+            </div>
+            <div class="api-endpoint-body">
+              <p>Download a file. Returns a redirect to a presigned download URL from object storage. For large files, the client can request specific block ranges for partial/resumable downloads.</p>
+<pre><code>Request:
+  GET /api/v1/files/file_xyz789/download
+  Headers:
+    Authorization: Bearer &lt;user-token&gt;
+
+Response (200 OK):
+{
+  "file_id": "file_xyz789",
+  "file_name": "quarterly-report.pdf",
+  "file_size": 15728640,
+  "content_hash": "sha256:a1b2c3...",
+  "download_url": "https://storage.example.com/files/file_xyz789?sig=...",
+  "expires_at": "2026-04-14T13:00:00Z",
+  "blocks": [
+    {"index": 0, "hash": "sha256:block0hash", "url": "https://storage.example.com/blocks/block0hash?sig=..."},
+    {"index": 1, "hash": "sha256:block1hash", "url": "https://storage.example.com/blocks/block1hash?sig=..."},
+    {"index": 2, "hash": "sha256:block2hash", "url": "https://storage.example.com/blocks/block2hash?sig=..."},
+    {"index": 3, "hash": "sha256:block3hash", "url": "https://storage.example.com/blocks/block3hash?sig=..."}
+  ]
+}</code></pre>
+            </div>
+          </div>
+
+          <div class="api-endpoint">
+            <div class="api-endpoint-header">
+              <span class="api-method put">PUT</span>
+              <span class="api-path">/api/v1/files/{file_id}/metadata</span>
+            </div>
+            <div class="api-endpoint-body">
+              <p>Update file metadata (rename, move to a different folder, change description). Does not modify file content. Metadata changes are propagated to all synced devices via the notification channel.</p>
+<pre><code>Request:
+  PUT /api/v1/files/file_xyz789/metadata
+  Headers:
+    Authorization: Bearer &lt;user-token&gt;
+  Body:
+  {
+    "file_name": "Q1-2026-quarterly-report.pdf",
+    "parent_id": "folder_def456",
+    "description": "Updated quarterly report with final numbers"
+  }
+
+Response (200 OK):
+{
+  "file_id": "file_xyz789",
+  "file_name": "Q1-2026-quarterly-report.pdf",
+  "parent_id": "folder_def456",
+  "version": 2,
+  "updated_at": "2026-04-14T10:30:00Z"
+}</code></pre>
+            </div>
+          </div>
+
+          <div class="api-endpoint">
+            <div class="api-endpoint-header">
+              <span class="api-method get">GET</span>
+              <span class="api-path">/api/v1/files/{file_id}/revisions</span>
+            </div>
+            <div class="api-endpoint-body">
+              <p>List all revisions (versions) of a file. Each revision includes the timestamp, author, file size, and a download link. Users can restore any previous revision.</p>
+<pre><code>Request:
+  GET /api/v1/files/file_xyz789/revisions
+  Headers:
+    Authorization: Bearer &lt;user-token&gt;
+
+Response (200 OK):
+{
+  "file_id": "file_xyz789",
+  "revisions": [
+    {
+      "revision_id": "rev_003",
+      "version": 3,
+      "author": "user_alice",
+      "file_size": 15728640,
+      "content_hash": "sha256:c3d4e5...",
+      "created_at": "2026-04-14T10:30:00Z",
+      "is_current": true
+    },
+    {
+      "revision_id": "rev_002",
+      "version": 2,
+      "author": "user_alice",
+      "file_size": 14680064,
+      "content_hash": "sha256:b2c3d4...",
+      "created_at": "2026-04-12T14:15:00Z",
+      "is_current": false
+    },
+    {
+      "revision_id": "rev_001",
+      "version": 1,
+      "author": "user_alice",
+      "file_size": 12582912,
+      "content_hash": "sha256:a1b2c3...",
+      "created_at": "2026-04-10T09:00:00Z",
+      "is_current": false
+    }
+  ],
+  "retention_policy": "30_days"
+}</code></pre>
+            </div>
+          </div>
+
+          <div class="api-endpoint">
+            <div class="api-endpoint-header">
+              <span class="api-method post">POST</span>
+              <span class="api-path">/api/v1/files/{file_id}/share</span>
+            </div>
+            <div class="api-endpoint-body">
+              <p>Share a file or folder with other users. Supports granular permission levels (viewer, commenter, editor) and shareable links with optional expiration and password.</p>
+<pre><code>Request:
+  POST /api/v1/files/file_xyz789/share
+  Headers:
+    Authorization: Bearer &lt;user-token&gt;
+  Body:
+  {
+    "shares": [
+      {"email": "bob@example.com", "role": "editor"},
+      {"email": "carol@example.com", "role": "viewer"}
+    ],
+    "link_sharing": {
+      "enabled": true,
+      "role": "viewer",
+      "expires_at": "2026-05-14T00:00:00Z",
+      "password": "optional-password"
+    },
+    "notify": true,
+    "message": "Please review the Q1 report"
+  }
+
+Response (200 OK):
+{
+  "file_id": "file_xyz789",
+  "permissions": [
+    {"user": "user_alice", "role": "owner"},
+    {"user": "user_bob", "role": "editor"},
+    {"user": "user_carol", "role": "viewer"}
+  ],
+  "share_link": "https://drive.example.com/s/abc123def456",
+  "link_expires_at": "2026-05-14T00:00:00Z"
+}</code></pre>
+            </div>
+          </div>
+
+          <div class="info-box warning">
+            <strong>Why Block-Level Upload?</strong> The upload API accepts a list of block hashes rather than the raw file. This enables two critical optimizations: (1) <strong>Delta sync</strong> &mdash; when a user edits a 15 MB file, only the changed 4 MB blocks are uploaded, not the entire file. The server compares block hashes against the previous version and tells the client which blocks are new. (2) <strong>Cross-user deduplication</strong> &mdash; if two users upload the same file (or files with identical blocks), the blocks are stored only once. The server responds with <code>blocks_already_stored</code> to skip redundant uploads. This is the core insight from Dropbox&rsquo;s architecture and is the single most important design decision in a file sync system.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- DATA MODEL -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="data-model"></span>
+        <section class="section">
+          <h2>4. Data Model</h2>
+
+          <h3>users</h3>
+          <p>User account information and storage quota tracking.</p>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Column</th>
+                  <th>Type</th>
+                  <th>Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>user_id</code></td>
+                  <td>UUID (PK)</td>
+                  <td>Unique user identifier</td>
+                </tr>
+                <tr>
+                  <td><code>email</code></td>
+                  <td>VARCHAR (unique)</td>
+                  <td>User email address</td>
+                </tr>
+                <tr>
+                  <td><code>display_name</code></td>
+                  <td>VARCHAR</td>
+                  <td>User display name</td>
+                </tr>
+                <tr>
+                  <td><code>storage_quota</code></td>
+                  <td>BIGINT</td>
+                  <td>Maximum storage in bytes (default: 15 GB)</td>
+                </tr>
+                <tr>
+                  <td><code>storage_used</code></td>
+                  <td>BIGINT</td>
+                  <td>Current storage usage in bytes</td>
+                </tr>
+                <tr>
+                  <td><code>plan</code></td>
+                  <td>ENUM</td>
+                  <td><code>free</code>, <code>basic</code>, <code>premium</code>, <code>enterprise</code></td>
+                </tr>
+                <tr>
+                  <td><code>created_at</code></td>
+                  <td>TIMESTAMP</td>
+                  <td>Account creation time</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>files</h3>
+          <p>Core file and folder metadata. Uses an adjacency list model (parent_id) for the directory tree. Stored in a relational database (PostgreSQL) with strong consistency.</p>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Column</th>
+                  <th>Type</th>
+                  <th>Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>file_id</code></td>
+                  <td>UUID (PK)</td>
+                  <td>Unique file/folder identifier</td>
+                </tr>
+                <tr>
+                  <td><code>name</code></td>
+                  <td>VARCHAR(500)</td>
+                  <td>File or folder name</td>
+                </tr>
+                <tr>
+                  <td><code>path</code></td>
+                  <td>VARCHAR</td>
+                  <td>Full materialized path (e.g., <code>/Documents/Reports/Q1</code>)</td>
+                </tr>
+                <tr>
+                  <td><code>size</code></td>
+                  <td>BIGINT</td>
+                  <td>File size in bytes (0 for folders)</td>
+                </tr>
+                <tr>
+                  <td><code>content_hash</code></td>
+                  <td>VARCHAR(64)</td>
+                  <td>SHA-256 hash of the file content (null for folders)</td>
+                </tr>
+                <tr>
+                  <td><code>is_directory</code></td>
+                  <td>BOOLEAN</td>
+                  <td>True if this entry is a folder</td>
+                </tr>
+                <tr>
+                  <td><code>parent_id</code></td>
+                  <td>UUID (FK, indexed)</td>
+                  <td>Parent folder ID (null for root)</td>
+                </tr>
+                <tr>
+                  <td><code>owner_id</code></td>
+                  <td>UUID (FK)</td>
+                  <td>User who owns this file</td>
+                </tr>
+                <tr>
+                  <td><code>latest_version</code></td>
+                  <td>INT</td>
+                  <td>Current version number</td>
+                </tr>
+                <tr>
+                  <td><code>mime_type</code></td>
+                  <td>VARCHAR</td>
+                  <td>MIME type (e.g., <code>application/pdf</code>)</td>
+                </tr>
+                <tr>
+                  <td><code>status</code></td>
+                  <td>ENUM</td>
+                  <td><code>active</code>, <code>trashed</code>, <code>deleted</code></td>
+                </tr>
+                <tr>
+                  <td><code>created_at</code></td>
+                  <td>TIMESTAMP</td>
+                  <td>File creation time</td>
+                </tr>
+                <tr>
+                  <td><code>updated_at</code></td>
+                  <td>TIMESTAMP</td>
+                  <td>Last modification time</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>file_versions</h3>
+          <p>Tracks every revision of a file. Each version stores a list of block references rather than a full copy of the file, enabling storage-efficient versioning.</p>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Column</th>
+                  <th>Type</th>
+                  <th>Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>version_id</code></td>
+                  <td>UUID (PK)</td>
+                  <td>Unique version identifier</td>
+                </tr>
+                <tr>
+                  <td><code>file_id</code></td>
+                  <td>UUID (FK, indexed)</td>
+                  <td>The file this version belongs to</td>
+                </tr>
+                <tr>
+                  <td><code>version_number</code></td>
+                  <td>INT</td>
+                  <td>Sequential version number (1, 2, 3, ...)</td>
+                </tr>
+                <tr>
+                  <td><code>block_list</code></td>
+                  <td>JSONB</td>
+                  <td>Ordered array of block hashes that compose this version</td>
+                </tr>
+                <tr>
+                  <td><code>content_hash</code></td>
+                  <td>VARCHAR(64)</td>
+                  <td>SHA-256 hash of the full file at this version</td>
+                </tr>
+                <tr>
+                  <td><code>size</code></td>
+                  <td>BIGINT</td>
+                  <td>File size at this version</td>
+                </tr>
+                <tr>
+                  <td><code>author_id</code></td>
+                  <td>UUID (FK)</td>
+                  <td>User who created this version</td>
+                </tr>
+                <tr>
+                  <td><code>device_id</code></td>
+                  <td>VARCHAR</td>
+                  <td>Device that originated the change</td>
+                </tr>
+                <tr>
+                  <td><code>created_at</code></td>
+                  <td>TIMESTAMP</td>
+                  <td>When this version was created</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>sharing_permissions</h3>
+          <p>Access control list (ACL) for shared files and folders. Permissions on a folder cascade to all children.</p>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Column</th>
+                  <th>Type</th>
+                  <th>Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>permission_id</code></td>
+                  <td>UUID (PK)</td>
+                  <td>Unique permission entry</td>
+                </tr>
+                <tr>
+                  <td><code>file_id</code></td>
+                  <td>UUID (FK, indexed)</td>
+                  <td>The file or folder being shared</td>
+                </tr>
+                <tr>
+                  <td><code>grantee_id</code></td>
+                  <td>UUID (FK, nullable)</td>
+                  <td>User or group receiving access (null for link sharing)</td>
+                </tr>
+                <tr>
+                  <td><code>grantee_type</code></td>
+                  <td>ENUM</td>
+                  <td><code>user</code>, <code>group</code>, <code>anyone_with_link</code></td>
+                </tr>
+                <tr>
+                  <td><code>role</code></td>
+                  <td>ENUM</td>
+                  <td><code>owner</code>, <code>editor</code>, <code>commenter</code>, <code>viewer</code></td>
+                </tr>
+                <tr>
+                  <td><code>share_link</code></td>
+                  <td>VARCHAR (nullable)</td>
+                  <td>Shareable link token (for link sharing)</td>
+                </tr>
+                <tr>
+                  <td><code>expires_at</code></td>
+                  <td>TIMESTAMP (nullable)</td>
+                  <td>Link expiration time</td>
+                </tr>
+                <tr>
+                  <td><code>created_at</code></td>
+                  <td>TIMESTAMP</td>
+                  <td>When the permission was granted</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>blocks (Block Storage Metadata)</h3>
+          <p>Metadata for content-addressable block storage. The actual block data lives in object storage (S3/GCS), keyed by the block hash. This table tracks reference counts for garbage collection.</p>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Column</th>
+                  <th>Type</th>
+                  <th>Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>block_hash</code></td>
+                  <td>VARCHAR(64) (PK)</td>
+                  <td>SHA-256 hash of the block content (content-addressable)</td>
+                </tr>
+                <tr>
+                  <td><code>size</code></td>
+                  <td>INT</td>
+                  <td>Block size in bytes (up to 4 MB)</td>
+                </tr>
+                <tr>
+                  <td><code>ref_count</code></td>
+                  <td>INT</td>
+                  <td>Number of file versions referencing this block</td>
+                </tr>
+                <tr>
+                  <td><code>storage_url</code></td>
+                  <td>VARCHAR</td>
+                  <td>Object storage URL (e.g., <code>s3://blocks/sha256:a1b2c3...</code>)</td>
+                </tr>
+                <tr>
+                  <td><code>created_at</code></td>
+                  <td>TIMESTAMP</td>
+                  <td>When the block was first stored</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>workspaces</h3>
+          <p>Shared workspaces for team/enterprise accounts. A workspace is a shared root folder with its own storage quota and member list.</p>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Column</th>
+                  <th>Type</th>
+                  <th>Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>workspace_id</code></td>
+                  <td>UUID (PK)</td>
+                  <td>Unique workspace identifier</td>
+                </tr>
+                <tr>
+                  <td><code>name</code></td>
+                  <td>VARCHAR</td>
+                  <td>Workspace name (e.g., &ldquo;Engineering Team&rdquo;)</td>
+                </tr>
+                <tr>
+                  <td><code>owner_id</code></td>
+                  <td>UUID (FK)</td>
+                  <td>Admin user who created the workspace</td>
+                </tr>
+                <tr>
+                  <td><code>root_folder_id</code></td>
+                  <td>UUID (FK)</td>
+                  <td>Root folder for this workspace in the files table</td>
+                </tr>
+                <tr>
+                  <td><code>storage_quota</code></td>
+                  <td>BIGINT</td>
+                  <td>Workspace storage limit in bytes</td>
+                </tr>
+                <tr>
+                  <td><code>storage_used</code></td>
+                  <td>BIGINT</td>
+                  <td>Current storage usage</td>
+                </tr>
+                <tr>
+                  <td><code>created_at</code></td>
+                  <td>TIMESTAMP</td>
+                  <td>Workspace creation time</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="info-box note">
+            <strong>Why Content-Addressable Block Storage?</strong> The blocks table uses the SHA-256 hash as the primary key. This means identical content is stored exactly once, regardless of how many files or users reference it. If 1,000 users upload the same 15 MB PDF, it is stored as four 4 MB blocks, each stored once. The file_versions table simply records the ordered list of block hashes. To reconstruct any version of any file, the system reads the block_list from file_versions and fetches each block from object storage by its hash. This architecture enables: (1) cross-user deduplication, (2) storage-efficient versioning (versions share unchanged blocks), and (3) fast integrity verification (recompute hash and compare).
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- HIGH-LEVEL DESIGN -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="high-level-design"></span>
+        <section class="section">
+          <h2>5. High-Level Design</h2>
+
+          <p>The system consists of four major components: the <strong>Client (with local sync agent)</strong>, <strong>API Servers</strong>, <strong>Block Storage (S3)</strong>, and <strong>Metadata DB + Notification Service</strong>. The sync agent on the client is the most complex component &mdash; it monitors the local filesystem, computes block-level diffs, and communicates with the server to upload only changed blocks.</p>
+
+          <h3>System Architecture</h3>
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    subgraph Client["CLIENT (Desktop / Mobile)"]
+        subgraph LSA["LOCAL SYNC AGENT"]
+            FW["File Watcher\nMonitors local filesystem\n(inotify / FSEvents)"]
+            CH["Chunker\nSplits files into 4 MB blocks\nhashes each block (SHA-256)"]
+            LDB["Local DB\nTracks local file state\nblock hashes, sync cursors"]
+            OQ["Offline Queue\nQueues changes when offline\nreplays when reconnected"]
+            SE["Sync Engine\nOrchestrates upload/download\nof blocks, metadata sync"]
+            CR["Conflict Resolver\nDetects and resolves conflicts"]
+            FW --> CH
+            CH --> LDB
+            CH --> SE
+            LDB --> SE
+            OQ --> SE
+            CR --> SE
+        end
+    end
+
+    Client --> AGW
+    Client --> NS
+    Client --> BS
+
+    AGW["API Gateway\nAuth / ACL\nRate limiting\nRoute to services"]
+    NS["Notification Service\nLong polling / WebSocket\nPush changes to all devices\nChange feed per user"]
+    BS["Block Storage (S3 / GCS)\nContent-addressable block store\nKey = SHA-256 hash\nEach block stored exactly once"]
+
+    AGW --> API
+
+    subgraph API["API Servers"]
+        FS["File Service\nUpload, download\nmetadata CRUD"]
+        SS["Sharing Service\nPermissions, ACL, links"]
+        VS["Version Service\nRevision history, rollback"]
+        FS --> SS
+        SS --> VS
+    end
+
+    API --> MDB
+    BS --> MDB
+
+    subgraph MDB["METADATA DATABASE (PostgreSQL + Replicas)"]
+        direction LR
+        T1[("files\n100B rows")]
+        T2[("file_versions\nBlock lists per version")]
+        T3[("blocks\nDedup index")]
+        T4[("sharing_permissions\nACL entries")]
+        T5[("workspaces\nTeam folders")]
+    end
+          </div></div>
+
+          <h3>Upload Flow (File Change on Device A)</h3>
+          <div class="flow-container">
+            <div class="flow-box">File Watcher detects change</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Chunker splits file into 4 MB blocks &amp; hashes each</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">Sync Engine sends block hashes to server</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Server identifies new/changed blocks</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">Client uploads only new blocks to S3</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Server updates metadata &amp; notifies other devices</div>
+          </div>
+
+          <h3>Download Flow (Sync to Device B)</h3>
+          <div class="flow-container">
+            <div class="flow-box">Notification Service pushes change event</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Device B receives change notification</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">Sync Engine fetches new file metadata</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Compares block list: identifies blocks to download</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">Downloads only missing blocks from S3</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Reassembles file from blocks locally</div>
+          </div>
+
+          <h3>Key Components</h3>
+          <ul class="content-list">
+            <li><strong>Local Sync Agent:</strong> The most complex component. Runs on the user&rsquo;s device and monitors the local filesystem for changes (using OS-level APIs like inotify on Linux, FSEvents on macOS, ReadDirectoryChangesW on Windows). Splits files into 4 MB blocks, computes SHA-256 hashes, maintains a local SQLite database of file states, and orchestrates upload/download of changed blocks.</li>
+            <li><strong>API Servers:</strong> Stateless services that handle file metadata CRUD, sharing/permissions, and version management. Do not handle raw file data &mdash; block uploads go directly to object storage via presigned URLs.</li>
+            <li><strong>Block Storage (S3/GCS):</strong> Content-addressable object store where each block is stored with its SHA-256 hash as the key. Provides 11-nines durability. Identical blocks are stored exactly once (deduplication). This is the source of truth for all file content.</li>
+            <li><strong>Metadata Database (PostgreSQL):</strong> Stores all file metadata, version history, block references, permissions, and workspace data. Must be strongly consistent &mdash; eventual consistency for metadata leads to data corruption (e.g., conflicting file trees). Uses read replicas for query throughput.</li>
+            <li><strong>Notification Service:</strong> Maintains persistent connections (long polling or WebSocket) to all online clients. When a file changes, pushes a lightweight notification to all devices that have access to that file. The client then pulls the full change details from the API server.</li>
+          </ul>
+
+          <div class="info-box important">
+            <strong>Why Strong Consistency for Metadata?</strong> Unlike social media feeds (where eventual consistency is fine), file storage metadata <strong>must</strong> be strongly consistent. Consider what happens with eventual consistency: User renames <code>/docs/report.pdf</code> to <code>/docs/final-report.pdf</code> on device A. Before the rename propagates, device B edits the file and saves it to the old path <code>/docs/report.pdf</code>. Now we have two files, data is split, and the user&rsquo;s intent is lost. With strong consistency, device B&rsquo;s save would see the new name and write to the correct path. This is why Google Drive and Dropbox use RDBMS (PostgreSQL/MySQL) with ACID transactions for metadata, not NoSQL.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- DEEP DIVE -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="deep-dive"></span>
+        <section class="section">
+          <h2>6. Deep Dive</h2>
+
+          <!-- 6a. Block-Level Sync -->
+          <h3>6a. Block-Level Sync &mdash; The Core Innovation</h3>
+          <p>Block-level sync is the single most important design decision in a file sync system. Instead of uploading/downloading entire files on every change, the system splits files into fixed-size blocks (4 MB), hashes each block, and transfers only the blocks that have changed. This is the key insight from Dropbox&rsquo;s architecture.</p>
+
+          <div class="diagram-box">
+<pre>
+    BLOCK-LEVEL SYNC — How It Works
+    ═══════════════════════════════════════════════════════════════
+
+    STEP 1: Split file into 4 MB blocks and hash each block
+
+    Original file (16 MB):
+    ┌──────────┬──────────┬──────────┬──────────┐
+    │ Block 0  │ Block 1  │ Block 2  │ Block 3  │
+    │ 4 MB     │ 4 MB     │ 4 MB     │ 4 MB     │
+    │ hash:A1  │ hash:B2  │ hash:C3  │ hash:D4  │
+    └──────────┴──────────┴──────────┴──────────┘
+
+    Version 1 block list: [A1, B2, C3, D4]
+
+
+    STEP 2: User edits the file (changes content in block 1)
+
+    Modified file (16 MB):
+    ┌──────────┬──────────┬──────────┬──────────┐
+    │ Block 0  │ Block 1  │ Block 2  │ Block 3  │
+    │ 4 MB     │ 4 MB     │ 4 MB     │ 4 MB     │
+    │ hash:A1  │ hash:E5  │ hash:C3  │ hash:D4  │
+    │ SAME     │ CHANGED  │ SAME     │ SAME     │
+    └──────────┴──────────┴──────────┴──────────┘
+
+    Version 2 block list: [A1, E5, C3, D4]
+
+
+    STEP 3: Sync engine computes diff
+
+    Version 1: [A1, B2, C3, D4]
+    Version 2: [A1, E5, C3, D4]
+                     ^^
+                  Only block 1 changed (B2 → E5)
+
+    Upload required: 1 block = 4 MB (not 16 MB)
+    Bandwidth saved: 75%
+</pre>
+          </div>
+
+          <div class="mermaid-container"><div class="mermaid">
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+    participant S3 as S3
+
+    C->>S: File updated, blocks: [A1, E5, C3, D4]
+    S->>S: Check block index
+    Note over S: A1: exists, E5: NEW, C3: exists, D4: exists
+    S-->>C: Upload block E5
+    C->>S3: PUT block E5 (4 MB)
+    S-->>C: Upload complete
+    S->>S: Create version 2, block_list=[A1,E5,C3,D4]
+    S->>S: Notify other devices
+          </div></div>
+
+          <div class="diagram-box">
+<pre>
+    WHY 4 MB BLOCKS?
+    ┌──────────────────────────────────────────────────────────┐
+    │                                                          │
+    │  Too small (e.g., 64 KB):                                │
+    │  - 16 MB file = 256 blocks = 256 hashes to track         │
+    │  - Metadata overhead dominates                           │
+    │  - Too many small HTTP requests (high overhead)          │
+    │  - Better granularity for delta sync                     │
+    │                                                          │
+    │  Too large (e.g., 64 MB):                                │
+    │  - 16 MB file = 1 block (no delta sync benefit)          │
+    │  - Any small edit re-uploads the entire block            │
+    │  - Less deduplication opportunity                        │
+    │  - Fewer HTTP requests (lower overhead)                  │
+    │                                                          │
+    │  4 MB is the sweet spot (Dropbox's choice):              │
+    │  - Good balance of granularity vs. overhead              │
+    │  - Most document edits affect 1-2 blocks                 │
+    │  - Reasonable number of blocks per file                  │
+    │  - Efficient HTTP transfers (not too small, not too big) │
+    │                                                          │
+    └──────────────────────────────────────────────────────────┘
+</pre>
+          </div>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> Block-level sync is the answer the interviewer is looking for. Say: &ldquo;The key insight is that we never transfer entire files. We split every file into 4 MB blocks, hash each block with SHA-256, and only upload blocks that are new or changed. The server maintains a global block index keyed by hash. If a block with the same hash already exists &mdash; whether from the same user, a previous version, or a completely different user &mdash; we skip the upload entirely. This gives us three benefits for free: delta sync, versioning, and deduplication.&rdquo;
+          </div>
+
+          <!-- 6b. Deduplication -->
+          <h3>6b. Deduplication &mdash; Store Once, Reference Many</h3>
+          <p>Content-addressable storage means that identical blocks are stored exactly once, regardless of how many files, versions, or users reference them. This is not just an optimization &mdash; at scale, deduplication saves 30-50% of total storage.</p>
+
+          <div class="diagram-box">
+<pre>
+    CROSS-USER DEDUPLICATION
+    ═══════════════════════════════════════════════════════════════
+
+    User Alice uploads "company-handbook.pdf" (12 MB):
+    ┌──────────┬──────────┬──────────┐
+    │ Block 0  │ Block 1  │ Block 2  │
+    │ hash:X1  │ hash:Y2  │ hash:Z3  │
+    └──────────┴──────────┴──────────┘
+    → 3 blocks uploaded and stored in S3
+
+    User Bob uploads the SAME "company-handbook.pdf" (12 MB):
+    ┌──────────┬──────────┬──────────┐
+    │ Block 0  │ Block 1  │ Block 2  │
+    │ hash:X1  │ hash:Y2  │ hash:Z3  │
+    └──────────┴──────────┴──────────┘
+    → Server: "All 3 blocks already exist. Upload skipped."
+    → 0 bytes uploaded. 0 bytes of additional storage.
+    → Bob's file_version record points to the same blocks.
+
+
+    CROSS-VERSION DEDUPLICATION
+    ═══════════════════════════════════════════════════════════════
+
+    Alice edits her handbook (changes only the last section):
+
+    Version 1: [X1, Y2, Z3]     → 3 blocks stored
+    Version 2: [X1, Y2, W4]     → 1 new block (W4) stored
+    Version 3: [X1, Y2, W4, V5] → 1 new block (V5) stored
+
+    Without dedup: 3 + 3 + 4 = 10 blocks = 40 MB
+    With dedup:    3 + 1 + 1 = 5 unique blocks = 20 MB
+    Savings: 50%
+
+
+    BLOCK REFERENCE COUNTING
+    ═══════════════════════════════════════════════════════════════
+
+    blocks table:
+    ┌────────────┬──────────┬────────────────────────────────┐
+    │ block_hash │ ref_count│ referenced by                  │
+    ├────────────┼──────────┼────────────────────────────────┤
+    │ X1         │ 5        │ Alice v1, v2, v3; Bob v1; ...  │
+    │ Y2         │ 5        │ Alice v1, v2, v3; Bob v1; ...  │
+    │ Z3         │ 2        │ Alice v1; Bob v1               │
+    │ W4         │ 2        │ Alice v2, v3                   │
+    │ V5         │ 1        │ Alice v3                       │
+    └────────────┴──────────┴────────────────────────────────┘
+
+    Garbage collection:
+    When ref_count drops to 0 (all versions deleted/expired),
+    the block is eligible for deletion from S3.
+
+    NEVER delete a block while ref_count > 0.
+    Use a background GC job with a grace period (e.g., 7 days)
+    to avoid race conditions during concurrent uploads.
+
+
+    STORAGE SAVINGS AT SCALE
+    ═══════════════════════════════════════════════════════════════
+
+    Without deduplication:
+      500M users × 200 files × 100 KB avg = 10 PB
+
+    With block-level deduplication:
+      • Same files across users: ~20% overlap
+      • Same blocks across versions: ~40% overlap
+      • Estimated effective dedup ratio: 30-50%
+
+      Effective storage: 10 PB × 0.6 = 6 PB
+      Savings: 4 PB = ~$92,000/month at $0.023/GB
+</pre>
+          </div>
+
+          <div class="info-box note">
+            <strong>Key Insight:</strong> Deduplication is not a feature &mdash; it is an emergent property of content-addressable storage. By using the SHA-256 hash as the block key, deduplication happens automatically at every level: within a file (repeated blocks), across versions (unchanged blocks), and across users (identical files). The system does not need a separate &ldquo;dedup engine&rdquo; &mdash; the block index IS the dedup engine. This is why Dropbox chose this architecture: it is simple, correct, and massively effective.
+          </div>
+
+          <!-- 6c. File Versioning -->
+          <h3>6c. File Versioning &mdash; Block-Level Version History</h3>
+          <p>File versioning is storage-efficient because versions share unchanged blocks. Reconstructing any version is simply a matter of reading the block list from the file_versions table and fetching each block from S3.</p>
+
+          <div class="diagram-box">
+<pre>
+    VERSION RECONSTRUCTION
+    ═══════════════════════════════════════════════════════════════
+
+    file_versions table for "report.pdf":
+
+    ┌─────────┬─────────────────────┬──────────┬─────────────────┐
+    │ version │ block_list          │ size     │ created_at      │
+    ├─────────┼─────────────────────┼──────────┼─────────────────┤
+    │ 1       │ [A1, B2, C3]        │ 12 MB    │ Apr 10, 09:00   │
+    │ 2       │ [A1, B2, D4]        │ 12 MB    │ Apr 11, 14:00   │
+    │ 3       │ [A1, E5, D4, F6]    │ 16 MB    │ Apr 12, 10:00   │
+    │ 4       │ [A1, E5, D4, F6, G7]│ 20 MB    │ Apr 14, 08:00   │
+    └─────────┴─────────────────────┴──────────┴─────────────────┘
+
+    To restore version 2:
+    1. Read block_list: [A1, B2, D4]
+    2. Fetch block A1 from S3 (4 MB)
+    3. Fetch block B2 from S3 (4 MB)
+    4. Fetch block D4 from S3 (4 MB)
+    5. Concatenate: A1 + B2 + D4 = 12 MB file
+    6. Update files.latest_version = 2
+    7. Create version 5 with block_list [A1, B2, D4]
+       (restore creates a new version, not a rollback)
+
+    Unique blocks stored across all 4 versions:
+    A1, B2, C3, D4, E5, F6, G7 = 7 blocks = 28 MB
+
+    Without block sharing:
+    12 + 12 + 16 + 20 = 60 MB
+
+    Storage savings: 53%
+
+
+    VERSION RETENTION POLICY
+    ═══════════════════════════════════════════════════════════════
+
+    ┌──────────────────────────────────────────────────────────┐
+    │  Free tier:    Keep versions for 30 days                 │
+    │  Basic tier:   Keep versions for 180 days                │
+    │  Premium tier: Keep versions indefinitely                │
+    │                                                          │
+    │  When a version expires:                                 │
+    │  1. Delete the file_versions row                         │
+    │  2. Decrement ref_count for each block in block_list     │
+    │  3. If any block's ref_count reaches 0 → mark for GC    │
+    │  4. Background GC deletes unreferenced blocks from S3    │
+    │     after a 7-day grace period                           │
+    └──────────────────────────────────────────────────────────┘
+</pre>
+          </div>
+
+          <!-- 6d. Conflict Resolution -->
+          <h3>6d. Conflict Resolution &mdash; Handling Concurrent Edits</h3>
+          <p>Conflicts occur when the same file is edited on two devices simultaneously (or when one device is offline). The system must detect conflicts and resolve them without data loss.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    A["Client sends sync request\nbase_version + new_block_list"] --> B{"file.latest_version\n== base_version?"}
+    B -->|Yes| C["No conflict\nAccept update, increment version"]
+    B -->|No| D{"Check file type"}
+
+    D -->|Binary files\nPDF, images, videos| E["Fork + Manual Merge\nSave conflict copy\nreport (conflict).pdf\nZero data loss"]
+    D -->|Text-based files\nCode, markdown| F{"Changes in\ndifferent blocks?"}
+    D -->|Structured docs\nGoogle Docs/Sheets| G["OT/CRDT-based\nReal-time merge\nSeparate service"]
+
+    F -->|Yes| H["Block-level auto-merge\nMerged: [A1, H8, D4, G7]"]
+    F -->|No - overlapping| E
+          </div></div>
+
+          <div class="comparison-grid">
+            <div class="comparison-card">
+              <h4>Recommended Approach</h4>
+<pre><code>Use a hybrid strategy:
+
+1. Binary files (PDF, images, videos):
+   → Fork + Manual Merge
+   → Cannot auto-merge binary formats
+   → Save conflict copy, notify user
+
+2. Text-based files (code, markdown):
+   → Block-level auto-merge if changes
+     are in different blocks
+   → Fork if changes overlap in the
+     same block
+
+3. Google Docs/Sheets (structured):
+   → OT/CRDT-based real-time merge
+   → Out of scope for file sync system
+   → Handled by a separate service</code></pre>
+            </div>
+            <div class="comparison-card">
+              <h4>Conflict Detection Protocol</h4>
+<pre><code>Every sync request includes:
+{
+  "file_id": "file_xyz789",
+  "base_version": 3,
+  "new_block_list": [A1, H8, D4, F6]
+}
+
+Server checks:
+  if file.latest_version == base_version:
+    → No conflict. Accept update.
+    → Increment version.
+  else:
+    → CONFLICT detected.
+    → Compare block lists to determine
+      if changes overlap.
+    → Apply resolution strategy.
+
+This is essentially optimistic
+concurrency control (OCC) using
+version numbers as the concurrency
+token.</code></pre>
+            </div>
+          </div>
+
+          <!-- 6e. Sync Protocol -->
+          <h3>6e. Sync Protocol &mdash; Notification and Change Propagation</h3>
+          <p>When a file changes on one device, all other devices with access must be notified and synced. The notification system must be real-time, reliable, and bandwidth-efficient.</p>
+
+          <div class="diagram-box">
+<pre>
+    SYNC PROTOCOL — Long Polling vs. WebSocket
+    ═══════════════════════════════════════════════════════════════
+
+    OPTION 1: Long Polling
+    ─────────────────────────────────────────────────────────────
+
+    Client                          Notification Service
+      │                                    │
+      │── GET /changes?cursor=1234 ───────►│
+      │                                    │  (holds connection
+      │                                    │   open for 30-60s)
+      │                                    │
+      │        ... file changes ...        │
+      │                                    │
+      │◄── {changes: [{file_id: "xyz",     │
+      │      action: "modified",           │
+      │      version: 5}],                 │
+      │     cursor: 1235}  ────────────────│
+      │                                    │
+      │── GET /changes?cursor=1235 ───────►│  (immediately
+      │                                    │   reconnect)
+      │        ... wait for changes ...    │
+      │                                    │
+
+    Pros: Works through firewalls/proxies, simple to implement
+    Cons: Higher latency (~1-2s), more HTTP overhead
+
+
+    OPTION 2: WebSocket
+    ─────────────────────────────────────────────────────────────
+
+    Client                          Notification Service
+      │                                    │
+      │── WebSocket CONNECT ──────────────►│
+      │◄── Connection established ─────────│
+      │                                    │
+      │        ... persistent connection ...
+      │                                    │
+      │◄── {type: "file_changed",          │  (instant push)
+      │     file_id: "xyz",                │
+      │     version: 5}  ─────────────────│
+      │                                    │
+      │◄── {type: "file_shared",           │  (instant push)
+      │     file_id: "abc",                │
+      │     shared_by: "bob"}  ───────────│
+      │                                    │
+
+    Pros: True real-time (<100ms latency), lower overhead
+    Cons: Requires WebSocket support, connection management
+
+
+    RECOMMENDED: Use both
+    ─────────────────────────────────────────────────────────────
+
+    - WebSocket for desktop sync agents (persistent connection)
+    - Long polling for web clients (better firewall compatibility)
+    - Push notifications (APNs/FCM) for mobile when app is
+      backgrounded
+</pre>
+          </div>
+
+          <div class="mermaid-container"><div class="mermaid">
+sequenceDiagram
+    participant DA as Device A (editor)
+    participant API as API Server
+    participant MQ as Message Queue
+    participant NS as Notification Service
+    participant DB as Metadata DB
+    participant S3 as S3
+    participant DB2 as Device B (syncing)
+
+    DA->>API: Upload changed blocks + metadata
+    API->>DB: Update DB, new version
+    API->>MQ: Publish event to message queue
+    MQ->>NS: Forward change event
+    API-->>DA: 200 OK (sync confirmed)
+    NS->>DB2: Push change notification
+    Note over NS,DB2: {file_id, version: 5, action: modified}
+    DB2->>API: GET file metadata
+    API-->>DB2: Return new block_list
+    DB2->>S3: Download only new blocks
+    Note over DB2: Reassemble file from blocks locally
+          </div></div>
+
+          <!-- 6f. Metadata DB -->
+          <h3>6f. Metadata Database &mdash; Strong Consistency at Scale</h3>
+          <p>The metadata database is the brain of the system. It must provide strong consistency (ACID transactions) while handling 100 billion file records and thousands of operations per second.</p>
+
+          <div class="diagram-box">
+<pre>
+    METADATA DB ARCHITECTURE
+    ═══════════════════════════════════════════════════════════════
+
+    ┌──────────────────────────────────────────────────────────┐
+    │                    PostgreSQL Cluster                     │
+    │                                                          │
+    │  ┌─────────────────┐                                     │
+    │  │  PRIMARY (Write) │                                     │
+    │  │                 │                                     │
+    │  │  All writes go  │                                     │
+    │  │  here (ACID)    │                                     │
+    │  │                 │                                     │
+    │  └────────┬────────┘                                     │
+    │           │                                              │
+    │     Synchronous replication (zero data loss)             │
+    │           │                                              │
+    │     ┌─────┼─────┐                                        │
+    │     ▼     ▼     ▼                                        │
+    │  ┌──────┐┌──────┐┌──────┐                                │
+    │  │Replica││Replica││Replica│                               │
+    │  │  #1  ││  #2  ││  #3  │                                │
+    │  │      ││      ││      │                                │
+    │  │ Read ││ Read ││ Read │                                │
+    │  │ only ││ only ││ only │                                │
+    │  └──────┘└──────┘└──────┘                                │
+    │                                                          │
+    │  Read replicas handle:                                   │
+    │  • File listing queries                                  │
+    │  • Search within user's files                            │
+    │  • Version history lookups                               │
+    │  • Permission checks                                     │
+    └──────────────────────────────────────────────────────────┘
+
+
+    SHARDING STRATEGY
+    ═══════════════════════════════════════════════════════════════
+
+    With 100 billion file records, a single PostgreSQL instance
+    cannot hold all data. Shard by owner_id (user ID):
+
+    ┌──────────────────────────────────────────────────────────┐
+    │  Shard key: owner_id (hash-based partitioning)           │
+    │                                                          │
+    │  Shard 0: users A-F → files, versions, permissions       │
+    │  Shard 1: users G-L → files, versions, permissions       │
+    │  Shard 2: users M-R → files, versions, permissions       │
+    │  Shard 3: users S-Z → files, versions, permissions       │
+    │                                                          │
+    │  Why shard by owner_id?                                  │
+    │  • All of a user's files are on the same shard           │
+    │  • File listing, search, quota checks are single-shard   │
+    │  • File operations (rename, move) are single-shard       │
+    │  • Sharing creates cross-shard references (handled by    │
+    │    storing a "shared_with_me" pointer on the viewer's    │
+    │    shard that references the owner's shard)              │
+    │                                                          │
+    │  Cross-shard query (rare):                               │
+    │  "List all files shared with me" → fan-out query to      │
+    │  the viewer's shard (which has shared_with_me pointers)  │
+    └──────────────────────────────────────────────────────────┘
+
+
+    KEY INDEXES
+    ═══════════════════════════════════════════════════════════════
+
+    files table:
+      • PRIMARY KEY (file_id)
+      • INDEX (owner_id, parent_id)     — list folder contents
+      • INDEX (owner_id, updated_at)    — recent files
+      • INDEX (content_hash)            — dedup lookup
+
+    file_versions table:
+      • PRIMARY KEY (version_id)
+      • INDEX (file_id, version_number) — version history
+
+    blocks table:
+      • PRIMARY KEY (block_hash)        — content-addressable
+
+    sharing_permissions table:
+      • INDEX (file_id)                 — who has access
+      • INDEX (grantee_id)              — shared with me
+</pre>
+          </div>
+
+          <div class="info-box note">
+            <strong>Key Insight:</strong> Sharding by owner_id keeps all of a user&rsquo;s data on a single shard, which means the most common operations (list files, upload, download, rename, move) are single-shard and fast. The one cross-shard operation is &ldquo;list files shared with me,&rdquo; which is handled by maintaining a lightweight pointer on the viewer&rsquo;s shard. This is a deliberate trade-off: we optimize for the common case (user accessing their own files) at the cost of slightly more complexity for the less common case (accessing shared files).
+          </div>
+
+          <!-- 6g. Offline Support -->
+          <h3>6g. Offline Support &mdash; Local Cache and Queued Sync</h3>
+          <p>Offline support is critical for a file sync system. Users must be able to access and edit files without an internet connection, with changes syncing automatically when connectivity is restored.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+stateDiagram-v2
+    [*] --> Online: Device connected
+
+    state Online {
+        [*] --> Monitoring
+        Monitoring --> DetectingChange: File Watcher detects change
+        DetectingChange --> Chunking: Chunker splits + hashes blocks
+        Chunking --> Uploading: Sync Engine uploads changed blocks
+        Uploading --> Notifying: Server confirms
+        Notifying --> Monitoring: Notify other devices
+    }
+
+    state Offline {
+        [*] --> QueuingChange
+        QueuingChange --> StoringLocally: Change queued in SQLite DB
+        StoringLocally --> WorkingOffline: Blocks stored in local cache
+        WorkingOffline --> QueuingChange: More changes detected
+        WorkingOffline --> WorkingOffline: User continues working
+    }
+
+    state Reconnecting {
+        [*] --> PullingServerChanges
+        PullingServerChanges --> CheckingConflicts: Pull changes since last cursor
+        CheckingConflicts --> ReplayingQueue: Compare base versions
+        ReplayingQueue --> UploadingToS3: Upload new blocks to S3
+        UploadingToS3 --> UpdatingMetadata: Update metadata on server
+        UpdatingMetadata --> ApplyingResolutions: If conflict, apply strategy
+        ApplyingResolutions --> UpdatingCursor: Update sync cursor
+    }
+
+    Online --> Offline: Network lost
+    Offline --> Reconnecting: Network restored
+    Reconnecting --> Online: Sync complete, resume real-time
+          </div></div>
+
+          <div class="diagram-box">
+<pre>
+    SYNC CURSOR — Tracking Sync State
+    ═══════════════════════════════════════════════════════════════
+
+    The sync cursor is a monotonically increasing token that
+    represents "I have seen all changes up to this point."
+
+    ┌──────────────────────────────────────────────────────────┐
+    │  Server change log:                                      │
+    │                                                          │
+    │  cursor=1001: file_abc modified (version 3)              │
+    │  cursor=1002: file_def created                           │
+    │  cursor=1003: file_ghi deleted                           │
+    │  cursor=1004: file_abc modified (version 4)              │
+    │  cursor=1005: file_jkl shared with user                  │
+    │                                                          │
+    │  Client's last sync cursor: 1002                         │
+    │  -> Client requests: GET /changes?cursor=1002             │
+    │  -> Server returns changes 1003, 1004, 1005               │
+    │  -> Client applies changes, updates cursor to 1005        │
+    │                                                          │
+    │  If client was offline for 3 days:                        │
+    │  -> Same mechanism, just more changes to replay           │
+    │  -> Server returns all changes since cursor=1002          │
+    └──────────────────────────────────────────────────────────┘
+</pre>
+          </div>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> The sync cursor is a simple but powerful concept. Say: &ldquo;Each client maintains a cursor &mdash; a monotonically increasing token that represents the last change it has seen. When the client reconnects after being offline, it sends its cursor to the server and receives all changes since that point. This works whether the client was offline for 5 seconds or 5 days &mdash; the protocol is the same. The server maintains a per-user change log (append-only) that the cursor indexes into. This is similar to Kafka consumer offsets or database replication log positions.&rdquo;
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- TRADE-OFFS -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="tradeoffs"></span>
+        <section class="section">
+          <h2>7. Trade-offs</h2>
+
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Decision</th>
+                  <th>Option A</th>
+                  <th>Option B</th>
+                  <th>Recommendation</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>Block size: 4 MB vs. 1 MB</strong></td>
+                  <td><strong>4 MB blocks:</strong> Fewer blocks per file (a 100 MB file = 25 blocks). Lower metadata overhead. Fewer HTTP requests during sync. Less granular delta sync &mdash; a 1-byte edit re-uploads 4 MB.</td>
+                  <td><strong>1 MB blocks:</strong> More blocks per file (100 MB = 100 blocks). Higher metadata overhead (4x more block records). More HTTP requests. More granular delta sync &mdash; a 1-byte edit re-uploads only 1 MB.</td>
+                  <td>Use <strong>4 MB blocks</strong> (Dropbox&rsquo;s choice). The metadata overhead of 1 MB blocks is significant at 100 billion files. Most file edits affect 1-2 blocks regardless of block size. The 3 MB &ldquo;waste&rdquo; per edit is negligible compared to the metadata savings. For very small files (&lt;4 MB), the entire file is a single block.</td>
+                </tr>
+                <tr>
+                  <td><strong>Sync protocol: Long polling vs. WebSocket</strong></td>
+                  <td><strong>Long polling:</strong> Works through all firewalls and proxies. Simpler server infrastructure. Higher latency (~1-2s). More HTTP overhead (new connection per poll cycle). Easier to scale with standard load balancers.</td>
+                  <td><strong>WebSocket:</strong> True real-time (&lt;100ms latency). Lower overhead (persistent connection). Requires WebSocket-aware infrastructure. More complex connection management (heartbeats, reconnection). Harder to scale (sticky sessions or connection routing).</td>
+                  <td>Use <strong>both</strong>. WebSocket for desktop sync agents (they run continuously and benefit from real-time push). Long polling for web clients (better compatibility, simpler). Mobile push notifications (APNs/FCM) for backgrounded apps. This hybrid approach maximizes compatibility while providing real-time sync where it matters most.</td>
+                </tr>
+                <tr>
+                  <td><strong>Conflict resolution: LWW vs. Fork</strong></td>
+                  <td><strong>Last-Writer-Wins (LWW):</strong> Simple to implement. No user intervention needed. Risk of silent data loss &mdash; the &ldquo;losing&rdquo; edit is discarded without the user knowing. Acceptable for non-critical data (e.g., app settings).</td>
+                  <td><strong>Fork + Manual Merge:</strong> Zero data loss &mdash; both versions are preserved. Requires user intervention to resolve. Can be confusing (&ldquo;Why do I have two copies?&rdquo;). More complex to implement (conflict file naming, notification).</td>
+                  <td>Use <strong>Fork + Manual Merge</strong> for binary files (Dropbox approach). Users trust the system with irreplaceable data &mdash; silent data loss is unacceptable. For text files where changes are in different blocks, auto-merge is safe. For Google Docs-style collaborative editing, use OT/CRDTs (separate system).</td>
+                </tr>
+                <tr>
+                  <td><strong>Deduplication scope: Per-user vs. Cross-user</strong></td>
+                  <td><strong>Per-user dedup:</strong> Only dedup blocks within a single user&rsquo;s files. Simpler &mdash; no cross-user privacy concerns. Lower dedup ratio (~20-30% savings). Block index is per-user (smaller, faster lookups).</td>
+                  <td><strong>Cross-user dedup:</strong> Dedup blocks across all users globally. Higher dedup ratio (~40-50% savings). Raises privacy questions (&ldquo;Can the system infer what files I have?&rdquo;). Requires a global block index (larger, more complex). Convergent encryption can mitigate privacy concerns.</td>
+                  <td>Use <strong>cross-user dedup</strong>. The storage savings at scale (4 PB = $92K/month) justify the complexity. Use convergent encryption (encrypt block with a key derived from its hash) so the server cannot read block contents but can still dedup by hash. Dropbox uses this approach. The global block index is a simple key-value lookup (hash &rarr; exists?) and scales well with sharding.</td>
+                </tr>
+                <tr>
+                  <td><strong>Metadata DB: RDBMS vs. NoSQL</strong></td>
+                  <td><strong>RDBMS (PostgreSQL):</strong> Strong consistency (ACID). Rich queries (JOIN, GROUP BY). Mature tooling. Harder to scale horizontally (requires sharding). Well-suited for file metadata with complex relationships (parent-child, permissions).</td>
+                  <td><strong>NoSQL (DynamoDB/Cassandra):</strong> Easy horizontal scaling. Eventually consistent by default (can configure strong consistency at cost). Limited query flexibility. Better for simple key-value access patterns.</td>
+                  <td>Use <strong>RDBMS (PostgreSQL)</strong> for metadata. File metadata requires strong consistency (see the rename race condition example above). The data model has complex relationships (file trees, permissions, versions) that benefit from JOINs and transactions. Shard by owner_id to scale horizontally. Use read replicas for query throughput. Both Google Drive and Dropbox use RDBMS for metadata.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> When discussing trade-offs, always connect back to the requirements. &ldquo;We chose Fork + Manual Merge for conflict resolution because our top non-functional requirement is reliability (zero data loss). LWW would be simpler but violates this requirement. We chose 4 MB blocks because our estimation shows 100 billion files &mdash; at 1 MB blocks, the metadata overhead would be 4x higher, adding ~300 TB to our metadata DB. We chose RDBMS over NoSQL because file metadata requires strong consistency &mdash; I showed earlier how eventual consistency leads to data corruption during concurrent renames.&rdquo;
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- REVISION CHECKLIST -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="revision"></span>
+        <section class="section">
+          <h2>8. Revision Checklist</h2>
+          <p>Use this checklist to verify you can recall the key concepts before your interview.</p>
+
+          <div class="checklist">
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Block-level sync</strong> is the core innovation: files are split into 4 MB blocks, each hashed with SHA-256. Only changed blocks are uploaded (delta sync). The server maintains a content-addressable block index. This single design decision enables delta sync, deduplication, and efficient versioning simultaneously.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Content-addressable storage</strong> means identical blocks are stored exactly once (key = SHA-256 hash). Deduplication is automatic at three levels: within a file (repeated blocks), across versions (unchanged blocks shared between versions), and across users (identical files). Saves 30-50% storage at scale.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>File versioning</strong> is storage-efficient because each version stores only a list of block hashes (not a full copy). Reconstructing any version = read block_list from file_versions + fetch each block from S3. Versions share unchanged blocks, so 4 versions of a 16 MB file may only consume 28 MB instead of 64 MB.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Conflict resolution</strong> uses optimistic concurrency control: each sync request includes a base_version. If base_version != current_version, a conflict is detected. Binary files use Fork + Manual Merge (Dropbox approach, zero data loss). Text files with non-overlapping block changes can be auto-merged.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Sync protocol</strong> uses WebSocket for desktop agents (real-time push, &lt;100ms), long polling for web clients (firewall-friendly), and mobile push notifications for backgrounded apps. A per-user change log with sync cursors enables efficient catch-up after offline periods.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Metadata DB</strong> uses PostgreSQL with strong consistency (ACID) because eventual consistency causes data corruption in file systems (e.g., concurrent rename race conditions). Sharded by owner_id so all of a user&rsquo;s files are on one shard. Read replicas handle query throughput.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Offline support</strong> uses a local SQLite DB to queue changes, a local file cache for offline access, and a sync cursor to track the last-seen server state. On reconnection, the client pulls all server changes since its cursor, checks for conflicts, then replays queued local changes.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>The <strong>local sync agent</strong> is the most complex client component: File Watcher (OS-level filesystem monitoring), Chunker (block splitting + hashing), Sync Engine (upload/download orchestration), Offline Queue, and Conflict Resolver. It maintains a local SQLite DB mirroring the server&rsquo;s metadata.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Architecture separation:</strong> Block storage (S3, content-addressable, 10 PB) is completely separate from metadata storage (PostgreSQL, 100 TB, strongly consistent). API servers are stateless. The notification service maintains persistent connections. This separation allows each component to scale independently.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>At <strong>Google Drive scale:</strong> 500M users, 100M DAU, ~2,300 sync ops/sec, 10 PB stored data (7 PB after dedup), 20 TB/day new data (6 TB after delta sync), 100 billion file metadata records. The system is metadata-heavy (not bandwidth-heavy like YouTube), so the architecture optimizes for metadata consistency and sync protocol efficiency.</span>
+            </label>
+          </div>
+        </section>
+
+        <!-- Bottom nav -->
+        <div class="problem-nav">
+          <a href="youtube.html"><span class="nav-label">Previous</span><span class="nav-title">YouTube</span></a>
+          <a href="web-crawler.html" class="next"><span class="nav-label">Next</span><span class="nav-title">Web Crawler</span></a>
+        </div>
+      </div>
+    </div>
+  </main>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script src="../js/app.js"></script>
+</body>
+</html>

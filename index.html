@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HLD Interview Prep — System Design Mastery</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+  <!-- Top Navigation -->
+  <nav class="top-nav">
+    <div class="top-nav-inner">
+      <a href="index.html" class="nav-logo">
+        <div class="nav-logo-icon">SD</div>
+        <span>HLD Interview Prep</span>
+      </a>
+      <div class="nav-actions">
+        <div class="nav-search">
+          <span class="nav-search-icon">&#x1F50D;</span>
+          <input type="text" id="search-input" placeholder="Search problems... (Ctrl+K)" autocomplete="off">
+        </div>
+        <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">&#x263E;</button>
+      </div>
+    </div>
+  </nav>
+
+  <div class="scroll-progress"></div>
+
+  <main class="main-content">
+
+    <!-- Hero Section -->
+    <section class="hero">
+      <h1>System Design Interview Prep</h1>
+      <p class="subtitle">
+        Master high-level design with structured breakdowns of the most frequently asked system design problems at top tech companies.
+      </p>
+      <div class="hero-stats">
+        <div class="hero-stat">
+          <div class="number">19</div>
+          <div class="label">Problems</div>
+        </div>
+        <div class="hero-stat">
+          <div class="number">6</div>
+          <div class="label">Categories</div>
+        </div>
+        <div class="hero-stat">
+          <div class="number">50+</div>
+          <div class="label">Key Concepts</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Filter Bar -->
+    <div class="filter-bar">
+      <button class="filter-btn active" data-category="all">All</button>
+      <button class="filter-btn" data-category="core">Core Infra</button>
+      <button class="filter-btn" data-category="storage">Storage & Data</button>
+      <button class="filter-btn" data-category="messaging">Messaging</button>
+      <button class="filter-btn" data-category="media">Media & Content</button>
+      <button class="filter-btn" data-category="social">Social & Feed</button>
+      <button class="filter-btn" data-category="platform">Platform</button>
+    </div>
+
+    <!-- Problems Grid -->
+    <div class="problems-grid">
+
+      <!-- 1. URL Shortener -->
+      <a href="problems/url-shortener.html" class="problem-card"
+         data-title="url shortener tinyurl" data-tags="hashing base62 nosql redirect" data-category="core">
+        <div class="card-header">
+          <span class="card-number">#01</span>
+          <span class="card-difficulty easy">Easy</span>
+        </div>
+        <div class="card-title">Design URL Shortener</div>
+        <div class="card-description">Design a service like TinyURL that generates short aliases for long URLs with high availability and low latency redirects.</div>
+        <div class="card-tags">
+          <span class="card-tag">Hashing</span>
+          <span class="card-tag">Base62</span>
+          <span class="card-tag">NoSQL</span>
+          <span class="card-tag">Cache</span>
+        </div>
+        <div class="card-meta">
+          <span class="card-companies"><strong>Asked at:</strong> Google, Amazon, Microsoft</span>
+          <span class="card-arrow">&rarr;</span>
+        </div>
+      </a>
+
+      <!-- 2. Rate Limiter -->
+      <a href="problems/rate-limiter.html" class="problem-card"
+         data-title="rate limiter api throttling" data-tags="token bucket sliding window redis" data-category="core">
+        <div class="card-header">
+          <span class="card-number">#02</span>
+          <span class="card-difficulty medium">Medium</span>
+        </div>
+        <div class="card-title">Design Rate Limiter</div>
+        <div class="card-description">Build a rate limiter to control the rate of requests a client can send to an API, preventing abuse and ensuring fair usage.</div>
+        <div class="card-tags">
+          <span class="card-tag">Token Bucket</span>
+          <span class="card-tag">Sliding Window</span>
+          <span class="card-tag">Redis</span>
+        </div>
+        <div class="card-meta">
+          <span class="card-companies"><strong>Asked at:</strong> Stripe, Cloudflare, Amazon</span>
+          <span class="card-arrow">&rarr;</span>
+        </div>
+      </a>
+
+      <!-- 3. Consistent Hashing -->
+      <a href="problems/consistent-hashing.html" class="problem-card"
+         data-title="consistent hashing distributed systems" data-tags="hash ring virtual nodes partitioning" data-category="core">
+        <div class="card-header">
+          <span class="card-number">#03</span>
+          <span class="card-difficulty medium">Medium</span>
+        </div>
+        <div class="card-title">Design Consistent Hashing</div>
+        <div class="card-description">Understand consistent hashing — the backbone of distributed systems for data partitioning and load balancing across nodes.</div>
+        <div class="card-tags">
+          <span class="card-tag">Hash Ring</span>
+          <span class="card-tag">Virtual Nodes</span>
+          <span class="card-tag">Partitioning</span>
+        </div>
+        <div class="card-meta">
+          <span class="card-companies"><strong>Asked at:</strong> Amazon, Facebook, Netflix</span>
+          <span class="card-arrow">&rarr;</span>
+        </div>
+      </a>
+
+      <!-- 4. Key-Value Store -->
+      <a href="problems/key-value-store.html" class="problem-card"
+         data-title="key value store distributed database" data-tags="dynamo cap theorem replication quorum" data-category="storage">
+        <div class="card-header">
+          <span class="card-number">#04</span>
+          <span class="card-difficulty hard">Hard</span>
+        </div>
+        <div class="card-title">Design Key-Value Store</div>
+        <div class="card-description">Design a distributed key-value store like DynamoDB supporting high availability, partition tolerance, and tunable consistency.</div>
+        <div class="card-tags">
+          <span class="card-tag">CAP Theorem</span>
+          <span class="card-tag">Replication</span>
+          <span class="card-tag">Quorum</span>
+          <span class="card-tag">Gossip</span>
+        </div>
+        <div class="card-meta">
+          <span class="card-companies"><strong>Asked at:</strong> Amazon, Google, LinkedIn</span>
+          <span class="card-arrow">&rarr;</span>
+        </div>
+      </a>
+
+      <!-- 5. Notification System -->
+      <a href="problems/notification-system.html" class="problem-card"
+         data-title="notification system push email sms" data-tags="push notification message queue fanout" data-category="messaging">
+        <div class="card-header">
+          <span class="card-number">#05</span>
+          <span class="card-difficulty medium">Medium</span>
+        </div>
+        <div class="card-title">Design Notification System</div>
+        <div class="card-description">Build a scalable notification system supporting push, SMS, and email notifications with prioritization and delivery guarantees.</div>
+        <div class="card-tags">
+          <span class="card-tag">Message Queue</span>
+          <span class="card-tag">Fan-out</span>
+          <span class="card-tag">APNs/FCM</span>
+        </div>
+        <div class="card-meta">
+          <span class="card-companies"><strong>Asked at:</strong> Apple, Google, Uber</span>
+          <span class="card-arrow">&rarr;</span>
+        </div>
+      </a>
+
+      <!-- 6. News Feed -->
+      <a href="problems/news-feed.html" class="problem-card"
+         data-title="news feed timeline social media" data-tags="fanout push pull ranking cache" data-category="social">
+        <div class="card-header">
+          <span class="card-number">#06</span>
+          <span class="card-difficulty hard">Hard</span>
+        </div>
+        <div class="card-title">Design News Feed System</div>
+        <div class="card-description">Design a news feed system like Facebook/Twitter that generates and serves personalized timelines at massive scale.</div>
+        <div class="card-tags">
+          <span class="card-tag">Fan-out</span>
+          <span class="card-tag">Ranking</span>
+          <span class="card-tag">Cache</span>
+          <span class="card-tag">Push vs Pull</span>
+        </div>
+        <div class="card-meta">
+          <span class="card-companies"><strong>Asked at:</strong> Meta, Twitter, LinkedIn</span>
+          <span class="card-arrow">&rarr;</span>
+        </div>
+      </a>
+
+      <!-- 7. Chat System -->
+      <a href="problems/chat-system.html" class="problem-card"
+         data-title="chat system messenger whatsapp" data-tags="websocket presence message queue" data-category="messaging">
+        <div class="card-header">
+          <span class="card-number">#07</span>
+          <span class="card-difficulty hard">Hard</span>
+        </div>
+        <div class="card-title">Design Chat System</div>
+        <div class="card-description">Design a real-time chat system like WhatsApp/Messenger supporting 1:1 and group chats, online presence, and message delivery.</div>
+        <div class="card-tags">
+          <span class="card-tag">WebSocket</span>
+          <span class="card-tag">Presence</span>
+          <span class="card-tag">Message Queue</span>
+        </div>
+        <div class="card-meta">
+          <span class="card-companies"><strong>Asked at:</strong> Meta, Microsoft, Slack</span>
+          <span class="card-arrow">&rarr;</span>
+        </div>
+      </a>
+
+      <!-- 8. Search Autocomplete -->
+      <a href="problems/search-autocomplete.html" class="problem-card"
+         data-title="search autocomplete typeahead" data-tags="trie prefix tree elasticsearch" data-category="platform">
+        <div class="card-header">
+          <span class="card-number">#08</span>
+          <span class="card-difficulty medium">Medium</span>
+        </div>
+        <div class="card-title">Design Search Autocomplete</div>
+        <div class="card-description">Design a typeahead/autocomplete system that suggests search queries in real-time as users type, with ranking by popularity.</div>
+        <div class="card-tags">
+          <span class="card-tag">Trie</span>
+          <span class="card-tag">Prefix Tree</span>
+          <span class="card-tag">Caching</span>
+        </div>
+        <div class="card-meta">
+          <span class="card-companies"><strong>Asked at:</strong> Google, Amazon, Bing</span>
+          <span class="card-arrow">&rarr;</span>
+        </div>
+      </a>
+
+      <!-- 9. YouTube -->
+      <a href="problems/youtube.html" class="problem-card"
+         data-title="youtube video streaming platform" data-tags="cdn transcoding blob storage streaming" data-category="media">
+        <div class="card-header">
+          <span class="card-number">#09</span>
+          <span class="card-difficulty hard">Hard</span>
+        </div>
+        <div class="card-title">Design YouTube</div>
+        <div class="card-description">Design a video streaming platform supporting upload, transcoding, storage, and adaptive bitrate streaming at global scale.</div>
+        <div class="card-tags">
+          <span class="card-tag">CDN</span>
+          <span class="card-tag">Transcoding</span>
+          <span class="card-tag">Blob Storage</span>
+          <span class="card-tag">HLS</span>
+        </div>
+        <div class="card-meta">
+          <span class="card-companies"><strong>Asked at:</strong> Google, Netflix, Amazon</span>
+          <span class="card-arrow">&rarr;</span>
+        </div>
+      </a>
+
+      <!-- 10. Google Drive -->
+      <a href="problems/google-drive.html" class="problem-card"
+         data-title="google drive dropbox file storage" data-tags="block storage sync dedup metadata" data-category="storage">
+        <div class="card-header">
+          <span class="card-number">#10</span>
+          <span class="card-difficulty hard">Hard</span>
+        </div>
+        <div class="card-title">Design Google Drive</div>
+        <div class="card-description">Design a cloud file storage service like Google Drive/Dropbox with file sync, versioning, sharing, and conflict resolution.</div>
+        <div class="card-tags">
+          <span class="card-tag">Block Storage</span>
+          <span class="card-tag">Sync</span>
+          <span class="card-tag">Dedup</span>
+          <span class="card-tag">Metadata</span>
+        </div>
+        <div class="card-meta">
+          <span class="card-companies"><strong>Asked at:</strong> Google, Dropbox, Microsoft</span>
+          <span class="card-arrow">&rarr;</span>
+        </div>
+      </a>
+
+      <!-- 11. Web Crawler -->
+      <a href="problems/web-crawler.html" class="problem-card"
+         data-title="web crawler search engine" data-tags="bfs politeness dedup distributed" data-category="platform">
+        <div class="card-header">
+          <span class="card-number">#11</span>
+          <span class="card-difficulty medium">Medium</span>
+        </div>
+        <div class="card-title">Design Web Crawler</div>
+        <div class="card-description">Design a distributed web crawler that efficiently crawls billions of web pages while being polite and handling duplicates.</div>
+        <div class="card-tags">
+          <span class="card-tag">BFS</span>
+          <span class="card-tag">Politeness</span>
+          <span class="card-tag">URL Frontier</span>
+        </div>
+        <div class="card-meta">
+          <span class="card-companies"><strong>Asked at:</strong> Google, Amazon, Apple</span>
+          <span class="card-arrow">&rarr;</span>
+        </div>
+      </a>
+
+      <!-- 12. Nearby Friends -->
+      <a href="problems/nearby-friends.html" class="problem-card"
+         data-title="nearby friends proximity service" data-tags="geohash quadtree location websocket" data-category="social">
+        <div class="card-header">
+          <span class="card-number">#12</span>
+          <span class="card-difficulty medium">Medium</span>
+        </div>
+        <div class="card-title">Design Nearby Friends</div>
+        <div class="card-description">Design a proximity service that shows nearby friends in real-time, handling location updates and efficient spatial queries.</div>
+        <div class="card-tags">
+          <span class="card-tag">Geohash</span>
+          <span class="card-tag">QuadTree</span>
+          <span class="card-tag">Redis Pub/Sub</span>
+        </div>
+        <div class="card-meta">
+          <span class="card-companies"><strong>Asked at:</strong> Meta, Uber, Lyft</span>
+          <span class="card-arrow">&rarr;</span>
+        </div>
+      </a>
+
+      <!-- 13. Distributed Message Queue -->
+      <a href="problems/message-queue.html" class="problem-card"
+         data-title="distributed message queue kafka" data-tags="kafka partitioning consumer groups replication" data-category="messaging">
+        <div class="card-header">
+          <span class="card-number">#13</span>
+          <span class="card-difficulty hard">Hard</span>
+        </div>
+        <div class="card-title">Design Message Queue</div>
+        <div class="card-description">Design a distributed message queue like Kafka with high throughput, durability, ordering guarantees, and consumer groups.</div>
+        <div class="card-tags">
+          <span class="card-tag">Partitioning</span>
+          <span class="card-tag">Replication</span>
+          <span class="card-tag">Consumer Groups</span>
+        </div>
+        <div class="card-meta">
+          <span class="card-companies"><strong>Asked at:</strong> LinkedIn, Uber, Confluent</span>
+          <span class="card-arrow">&rarr;</span>
+        </div>
+      </a>
+
+      <!-- 14. Metrics Monitoring -->
+      <a href="problems/metrics-monitoring.html" class="problem-card"
+         data-title="metrics monitoring alerting system" data-tags="time series aggregation alerting grafana" data-category="platform">
+        <div class="card-header">
+          <span class="card-number">#14</span>
+          <span class="card-difficulty medium">Medium</span>
+        </div>
+        <div class="card-title">Design Metrics Monitoring</div>
+        <div class="card-description">Design a metrics monitoring and alerting system that collects, stores, and visualizes time-series data with configurable alerts.</div>
+        <div class="card-tags">
+          <span class="card-tag">Time Series DB</span>
+          <span class="card-tag">Aggregation</span>
+          <span class="card-tag">Alerting</span>
+        </div>
+        <div class="card-meta">
+          <span class="card-companies"><strong>Asked at:</strong> Datadog, Amazon, Google</span>
+          <span class="card-arrow">&rarr;</span>
+        </div>
+      </a>
+
+      <!-- 15. Payment System -->
+      <a href="problems/payment-system.html" class="problem-card"
+         data-title="payment system digital wallet" data-tags="idempotency ledger reconciliation saga" data-category="platform">
+        <div class="card-header">
+          <span class="card-number">#15</span>
+          <span class="card-difficulty hard">Hard</span>
+        </div>
+        <div class="card-title">Design Payment System</div>
+        <div class="card-description">Design a payment system handling transactions, idempotency, reconciliation, and integration with payment gateways at scale.</div>
+        <div class="card-tags">
+          <span class="card-tag">Idempotency</span>
+          <span class="card-tag">Ledger</span>
+          <span class="card-tag">Saga Pattern</span>
+        </div>
+        <div class="card-meta">
+          <span class="card-companies"><strong>Asked at:</strong> Stripe, PayPal, Square</span>
+          <span class="card-arrow">&rarr;</span>
+        </div>
+      </a>
+
+      <!-- 16. Payment Auth System -->
+      <a href="problems/payment-auth.html" class="problem-card"
+         data-title="payment auth authorization visa card" data-tags="fraud detection settlement ledger redis" data-category="platform">
+        <div class="card-header">
+          <span class="card-number">#16</span>
+          <span class="card-difficulty hard">Hard</span>
+        </div>
+        <div class="card-title">Design Payment Authorization System</div>
+        <div class="card-description">Design a real-time payment authorization system like Visa/Mastercard that processes card transactions with sub-500ms decisions, fraud detection, and 99.999% availability.</div>
+        <div class="card-tags">
+          <span class="card-tag">Fraud Detection</span>
+          <span class="card-tag">Redis</span>
+          <span class="card-tag">Optimistic Locking</span>
+          <span class="card-tag">Settlement</span>
+        </div>
+        <div class="card-meta">
+          <span class="card-companies"><strong>Asked at:</strong> Databricks, Stripe, Visa</span>
+          <span class="card-arrow">&rarr;</span>
+        </div>
+      </a>
+
+      <!-- 17. Collaborative Editor -->
+      <a href="problems/collaborative-editor.html" class="problem-card"
+         data-title="collaborative editor google docs figma real time" data-tags="ot crdt websocket operational transformation" data-category="platform">
+        <div class="card-header">
+          <span class="card-number">#17</span>
+          <span class="card-difficulty hard">Hard</span>
+        </div>
+        <div class="card-title">Design Collaborative Editor</div>
+        <div class="card-description">Design a real-time collaborative document editor like Google Docs or Figma with live cursors, conflict resolution via OT/CRDT, and offline support.</div>
+        <div class="card-tags">
+          <span class="card-tag">OT / CRDT</span>
+          <span class="card-tag">WebSocket</span>
+          <span class="card-tag">Offline Sync</span>
+        </div>
+        <div class="card-meta">
+          <span class="card-companies"><strong>Asked at:</strong> Databricks, Google, Figma</span>
+          <span class="card-arrow">&rarr;</span>
+        </div>
+      </a>
+
+      <!-- 18. Workflow Orchestration -->
+      <a href="problems/workflow-orchestration.html" class="problem-card"
+         data-title="workflow orchestration airflow scheduler dag" data-tags="dag scheduler distributed workers retry" data-category="platform">
+        <div class="card-header">
+          <span class="card-number">#18</span>
+          <span class="card-difficulty hard">Hard</span>
+        </div>
+        <div class="card-title">Design Workflow Orchestration</div>
+        <div class="card-description">Design a distributed workflow orchestration platform like Apache Airflow with DAG scheduling, task execution, retries, and observability at scale.</div>
+        <div class="card-tags">
+          <span class="card-tag">DAG Scheduler</span>
+          <span class="card-tag">Task Queue</span>
+          <span class="card-tag">Lease-based</span>
+        </div>
+        <div class="card-meta">
+          <span class="card-companies"><strong>Asked at:</strong> Databricks, Airbnb, Uber</span>
+          <span class="card-arrow">&rarr;</span>
+        </div>
+      </a>
+
+      <!-- 19. Data Lakehouse -->
+      <a href="problems/data-lakehouse.html" class="problem-card"
+         data-title="data lakehouse delta lake iceberg acide" data-tags="parquet transaction log s3 time travel" data-category="storage">
+        <div class="card-header">
+          <span class="card-number">#19</span>
+          <span class="card-difficulty hard">Hard</span>
+        </div>
+        <div class="card-title">Design Data Lakehouse</div>
+        <div class="card-description">Design a unified data platform combining data lakes and warehouses with ACID transactions on object storage, time travel, and schema evolution.</div>
+        <div class="card-tags">
+          <span class="card-tag">Delta Lake</span>
+          <span class="card-tag">Transaction Log</span>
+          <span class="card-tag">Parquet</span>
+          <span class="card-tag">Time Travel</span>
+        </div>
+        <div class="card-meta">
+          <span class="card-companies"><strong>Asked at:</strong> Databricks, Snowflake, Netflix</span>
+          <span class="card-arrow">&rarr;</span>
+        </div>
+      </a>
+
+    </div>
+
+  </main>
+
+  <footer class="footer">
+    <p>HLD Interview Prep &mdash; Built for SSE Backend Interview Preparation</p>
+    <p>Real system design questions asked at top tech companies</p>
+  </footer>
+
+  <script src="js/app.js"></script>
+</body>
+</html>

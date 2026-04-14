@@ -1,0 +1,1185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Design Chat System — HLD Interview Prep</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+  <nav class="top-nav">
+    <div class="top-nav-inner">
+      <a href="../index.html" class="nav-logo">
+        <div class="nav-logo-icon">SD</div>
+        <span>HLD Interview Prep</span>
+      </a>
+      <div class="nav-actions">
+        <div class="nav-breadcrumb">
+          <a href="../index.html">Home</a>
+          <span class="separator">/</span>
+          <span class="current">Chat System</span>
+        </div>
+        <button class="theme-toggle" id="theme-toggle">&#x263E;</button>
+      </div>
+    </div>
+  </nav>
+  <div class="scroll-progress"></div>
+
+  <main class="main-content">
+    <div class="problem-page">
+      <!-- Sidebar TOC -->
+      <aside class="sidebar">
+        <div class="sidebar-title">On This Page</div>
+        <ul class="toc-list">
+          <li><a href="#requirements">Requirements</a></li>
+          <li><a href="#estimation">Capacity Estimation</a></li>
+          <li><a href="#api-design">API Design</a></li>
+          <li><a href="#data-model">Data Model</a></li>
+          <li><a href="#high-level-design">High-Level Design</a></li>
+          <li><a href="#deep-dive">Deep Dive</a></li>
+          <li><a href="#tradeoffs">Trade-offs</a></li>
+          <li><a href="#revision">Revision Checklist</a></li>
+        </ul>
+        <div class="progress-bar"><div class="progress-fill" style="width: 0%"></div></div>
+      </aside>
+
+      <div class="problem-content">
+        <!-- Header -->
+        <div class="problem-header">
+          <h1>Design a Chat System</h1>
+          <p class="problem-subtitle">Design a scalable real-time chat system (like WhatsApp or Facebook Messenger) that supports 1:1 messaging, group chats with up to 500 members, online/offline presence indicators, read receipts, media sharing, and message history &mdash; all with sub-100ms delivery latency, end-to-end encryption, and at-least-once delivery guarantees at the scale of 50 million daily active users.</p>
+          <div class="problem-meta-bar">
+            <span class="meta-badge difficulty-hard">Hard</span>
+            <span class="meta-badge">Messaging</span>
+            <span class="meta-badge">Asked at: Meta, Microsoft, Slack</span>
+          </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- REQUIREMENTS -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="requirements"></span>
+        <section class="section">
+          <h2>1. Requirements</h2>
+
+          <h3>Functional Requirements</h3>
+          <ul class="content-list">
+            <li><strong>1:1 chat</strong> &mdash; Users can send and receive text messages in real time with any other user. Messages are persisted and available across devices.</li>
+            <li><strong>Group chat</strong> &mdash; Users can create group conversations with up to 500 members. Any member can send a message visible to all other members of the group.</li>
+            <li><strong>Online/offline presence</strong> &mdash; Users can see whether their contacts are currently online, offline, or were &ldquo;last seen&rdquo; at a specific time. Presence updates propagate in near real time.</li>
+            <li><strong>Read receipts</strong> &mdash; Messages transition through delivery states: sent &rarr; delivered &rarr; read. Senders see visual indicators (single check, double check, blue check) reflecting the current state.</li>
+            <li><strong>Media sharing</strong> &mdash; Users can send images, videos, audio messages, and documents. Media is uploaded to object storage and a reference URL is sent as part of the message payload.</li>
+            <li><strong>Message history</strong> &mdash; Users can scroll back through their full conversation history. Messages are persisted indefinitely and paginated with cursor-based navigation.</li>
+          </ul>
+
+          <h3>Non-Functional Requirements</h3>
+          <ul class="content-list">
+            <li><strong>Real-time delivery:</strong> Messages must be delivered end-to-end in under 100ms (p99) when both users are online. The system must feel instantaneous.</li>
+            <li><strong>Massive scale:</strong> Support 50 million daily active users (DAU), each sending an average of 40 messages per day, totaling 2 billion messages per day.</li>
+            <li><strong>Message ordering:</strong> Messages within a single conversation must be displayed in a consistent, causally correct order across all participants. No message should appear &ldquo;before&rdquo; a message it was a reply to.</li>
+            <li><strong>At-least-once delivery:</strong> Every message must be delivered at least once. The system must handle network partitions, server crashes, and client disconnects without losing messages. Clients handle deduplication.</li>
+            <li><strong>End-to-end encryption (E2E):</strong> Message content is encrypted on the sender&rsquo;s device and decrypted only on the recipient&rsquo;s device. The server never sees plaintext message content.</li>
+            <li><strong>High availability:</strong> The system must be available 99.99% of the time. Chat is a core communication tool &mdash; downtime is unacceptable.</li>
+          </ul>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> Start by clarifying scope: &ldquo;Should we support 1:1 only, or also group chat? What&rsquo;s the max group size?&rdquo; Group chat fundamentally changes the fan-out strategy. Also ask: &ldquo;Do we need E2E encryption?&rdquo; E2E encryption means the server stores only ciphertext and cannot index or search message content, which affects many design decisions. Finally, clarify the delivery guarantee: &ldquo;Is at-least-once acceptable, or do we need exactly-once?&rdquo; Exactly-once is significantly harder and usually unnecessary &mdash; clients can deduplicate using message IDs.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- ESTIMATION -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="estimation"></span>
+        <section class="section">
+          <h2>2. Capacity Estimation</h2>
+
+          <h3>Assumptions</h3>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Parameter</th>
+                  <th>Value</th>
+                  <th>Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Daily Active Users (DAU)</td>
+                  <td>50 million</td>
+                  <td>WhatsApp-lite scale</td>
+                </tr>
+                <tr>
+                  <td>Messages per user per day</td>
+                  <td>40</td>
+                  <td>Mix of 1:1 and group messages</td>
+                </tr>
+                <tr>
+                  <td>Average message size</td>
+                  <td>100 bytes</td>
+                  <td>Text content + metadata (media stored separately)</td>
+                </tr>
+                <tr>
+                  <td>Concurrent connections</td>
+                  <td>~10 million</td>
+                  <td>~20% of DAU online at any given time</td>
+                </tr>
+                <tr>
+                  <td>Average group size</td>
+                  <td>10 members</td>
+                  <td>Most groups are small; max is 500</td>
+                </tr>
+                <tr>
+                  <td>Messages with media</td>
+                  <td>~10%</td>
+                  <td>Average media size ~200 KB (compressed images)</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>Throughput Calculation</h3>
+<pre><code>Message throughput:
+  Total messages/day    = 50M users &times; 40 msgs = 2 billion messages/day
+  Messages per second   = 2B / 86,400 &asymp; 23,000 msg/sec
+  Peak (3x)             &asymp; 70,000 msg/sec
+
+WebSocket connections:
+  Concurrent connections = 50M &times; 20% = 10 million persistent connections
+  At ~50K connections per server = 200 WebSocket servers
+
+Presence updates:
+  Heartbeat interval    = every 30 seconds
+  Heartbeat rate        = 10M online users / 30s &asymp; 333,000 heartbeats/sec</code></pre>
+
+          <h3>Storage Calculation</h3>
+<pre><code>Message storage:
+  Per message           = ~100 bytes (text + metadata)
+  Daily                 = 2B &times; 100 bytes = 200 GB/day
+  Yearly                = 200 GB &times; 365 = ~73 TB/year
+  5-year retention      = ~365 TB
+
+Media storage:
+  Messages with media   = 2B &times; 10% = 200M media files/day
+  Average media size    = 200 KB
+  Daily media storage   = 200M &times; 200 KB = 40 TB/day
+  Yearly media storage  = ~14.6 PB/year
+
+Connection state (Redis):
+  Per connection        = ~200 bytes (user_id, server_id, last_active)
+  Total                 = 10M &times; 200 bytes = 2 GB (fits in a single Redis node)</code></pre>
+
+          <div class="info-box note">
+            <strong>Key Insight:</strong> The numbers reveal two critical design drivers. First, 10 million concurrent WebSocket connections require a stateful connection layer &mdash; unlike REST APIs, you cannot simply load-balance across stateless servers because each connection is persistent. Second, at 23K messages/sec, the write throughput is moderate, but the storage grows relentlessly (365 TB over 5 years). This demands a storage engine optimized for sequential writes and time-range reads &mdash; exactly the pattern wide-column stores like Cassandra excel at.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- API DESIGN -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="api-design"></span>
+        <section class="section">
+          <h2>3. API Design</h2>
+
+          <p>The chat system uses a <strong>dual-protocol</strong> approach: WebSocket for real-time bidirectional communication (sending/receiving messages, presence updates, typing indicators) and REST for non-real-time operations (fetching message history, uploading media, managing groups).</p>
+
+          <h3>WebSocket Events</h3>
+          <div class="info-box note">
+            <strong>Why WebSocket?</strong> Chat requires the server to push messages to clients instantly. HTTP is request-response only &mdash; the server cannot initiate communication. WebSocket provides a persistent, full-duplex TCP connection where both client and server can send data at any time, enabling sub-100ms message delivery.
+          </div>
+
+          <div class="api-endpoint">
+            <div class="api-endpoint-header">
+              <span class="api-method post">WS</span>
+              <span class="api-path">wss://chat.example.com/ws?token={auth_token}</span>
+            </div>
+            <div class="api-endpoint-body">
+              <p>Establish a persistent WebSocket connection. The client authenticates via a JWT token in the query string. Once connected, the client can send and receive the following event types:</p>
+<pre><code>// ─── CLIENT → SERVER EVENTS ───────────────────────────────
+
+// Send a message
+{
+  "event": "message.send",
+  "data": {
+    "local_id": "client_uuid_abc123",   // Client-generated ID for dedup
+    "channel_id": "ch_7f3a9b2c",
+    "content": "Hey, are you free for lunch?",
+    "type": "text",                      // text | image | video | audio | file
+    "reply_to": null                     // message_id if replying to a message
+  }
+}
+
+// Mark messages as read
+{
+  "event": "message.read",
+  "data": {
+    "channel_id": "ch_7f3a9b2c",
+    "last_read_message_id": "msg_9x8y7z"
+  }
+}
+
+// Typing indicator
+{
+  "event": "typing.start",
+  "data": {
+    "channel_id": "ch_7f3a9b2c"
+  }
+}
+
+// Heartbeat (presence keepalive)
+{
+  "event": "heartbeat",
+  "data": {
+    "timestamp": 1713091800
+  }
+}
+
+// ─── SERVER → CLIENT EVENTS ───────────────────────────────
+
+// New message received
+{
+  "event": "message.new",
+  "data": {
+    "message_id": "msg_9x8y7z",
+    "local_id": "client_uuid_abc123",   // Echoed back for dedup
+    "channel_id": "ch_7f3a9b2c",
+    "sender_id": "u_44556",
+    "content": "Hey, are you free for lunch?",
+    "type": "text",
+    "created_at": "2026-04-14T10:30:00Z",
+    "seq_num": 1042                      // Per-channel sequence number
+  }
+}
+
+// Message delivery acknowledgment
+{
+  "event": "message.ack",
+  "data": {
+    "local_id": "client_uuid_abc123",
+    "message_id": "msg_9x8y7z",
+    "status": "delivered",               // sent | delivered | read
+    "timestamp": "2026-04-14T10:30:01Z"
+  }
+}
+
+// Presence update
+{
+  "event": "presence.update",
+  "data": {
+    "user_id": "u_11223",
+    "status": "online",                  // online | offline
+    "last_seen": "2026-04-14T10:30:00Z"
+  }
+}
+
+// Typing indicator
+{
+  "event": "typing.notify",
+  "data": {
+    "channel_id": "ch_7f3a9b2c",
+    "user_id": "u_44556",
+    "is_typing": true
+  }
+}</code></pre>
+            </div>
+          </div>
+
+          <h3>REST Endpoints</h3>
+
+          <div class="api-endpoint">
+            <div class="api-endpoint-header">
+              <span class="api-method post">POST</span>
+              <span class="api-path">/api/v1/messages</span>
+            </div>
+            <div class="api-endpoint-body">
+              <p>Send a message via REST (fallback when WebSocket is unavailable, or for media messages that require upload). The message is enqueued for delivery through the same pipeline as WebSocket messages.</p>
+<pre><code>Request:
+  POST /api/v1/messages
+  Headers:
+    Content-Type: application/json
+    Authorization: Bearer &lt;user-token&gt;
+  Body:
+  {
+    "channel_id": "ch_7f3a9b2c",
+    "content": "Check out this photo!",
+    "type": "image",
+    "media_url": "https://cdn.example.com/uploads/img_xyz789.jpg",
+    "local_id": "client_uuid_def456"
+  }
+
+Response (201 Created):
+{
+  "message_id": "msg_a1b2c3",
+  "local_id": "client_uuid_def456",
+  "channel_id": "ch_7f3a9b2c",
+  "sender_id": "u_98765",
+  "content": "Check out this photo!",
+  "type": "image",
+  "media_url": "https://cdn.example.com/uploads/img_xyz789.jpg",
+  "created_at": "2026-04-14T10:35:00Z",
+  "seq_num": 1043,
+  "status": "sent"
+}</code></pre>
+            </div>
+          </div>
+
+          <div class="api-endpoint">
+            <div class="api-endpoint-header">
+              <span class="api-method get">GET</span>
+              <span class="api-path">/api/v1/messages?channel_id={id}&amp;cursor={cursor}&amp;limit={limit}</span>
+            </div>
+            <div class="api-endpoint-body">
+              <p>Retrieve message history for a channel. Returns messages in reverse chronological order with cursor-based pagination. Used when a user scrolls up to load older messages or syncs a new device.</p>
+<pre><code>Request:
+  GET /api/v1/messages?channel_id=ch_7f3a9b2c&amp;cursor=msg_9x8y7z&amp;limit=50
+  Headers:
+    Authorization: Bearer &lt;user-token&gt;
+
+Response (200 OK):
+{
+  "messages": [
+    {
+      "message_id": "msg_9x8y7z",
+      "sender_id": "u_44556",
+      "content": "Hey, are you free for lunch?",
+      "type": "text",
+      "created_at": "2026-04-14T10:30:00Z",
+      "seq_num": 1042,
+      "status": "read"
+    },
+    {
+      "message_id": "msg_8w7v6u",
+      "sender_id": "u_98765",
+      "content": "Sure! Where should we go?",
+      "type": "text",
+      "created_at": "2026-04-14T10:28:00Z",
+      "seq_num": 1041,
+      "status": "read"
+    }
+  ],
+  "next_cursor": "msg_7t6s5r",
+  "has_more": true
+}</code></pre>
+            </div>
+          </div>
+
+          <div class="api-endpoint">
+            <div class="api-endpoint-header">
+              <span class="api-method get">GET</span>
+              <span class="api-path">/api/v1/presence/{user_id}</span>
+            </div>
+            <div class="api-endpoint-body">
+              <p>Get the online/offline status and last-seen timestamp for a specific user. Used to display presence indicators in the chat UI.</p>
+<pre><code>Request:
+  GET /api/v1/presence/u_44556
+  Headers:
+    Authorization: Bearer &lt;user-token&gt;
+
+Response (200 OK):
+{
+  "user_id": "u_44556",
+  "status": "online",
+  "last_seen": "2026-04-14T10:30:00Z"
+}</code></pre>
+            </div>
+          </div>
+
+          <div class="info-box warning">
+            <strong>local_id for Deduplication:</strong> The client generates a unique <code>local_id</code> (UUID) for every message before sending. If the network drops after the server receives the message but before the client gets the ACK, the client will retry. The server uses <code>local_id</code> to detect and discard duplicate submissions. This is how at-least-once delivery works without showing duplicate messages to recipients. The <code>local_id</code> is also echoed back in the server ACK so the client can match the server-assigned <code>message_id</code> to its local pending message.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- DATA MODEL -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="data-model"></span>
+        <section class="section">
+          <h2>4. Data Model</h2>
+
+          <h3>users</h3>
+          <p>Core user table. Stored in a relational database (PostgreSQL).</p>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Column</th>
+                  <th>Type</th>
+                  <th>Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>user_id</code></td>
+                  <td>UUID (PK)</td>
+                  <td>Unique user identifier</td>
+                </tr>
+                <tr>
+                  <td><code>username</code></td>
+                  <td>VARCHAR (unique)</td>
+                  <td>Display handle</td>
+                </tr>
+                <tr>
+                  <td><code>phone_number</code></td>
+                  <td>VARCHAR (unique)</td>
+                  <td>Phone number (primary identifier for WhatsApp-style)</td>
+                </tr>
+                <tr>
+                  <td><code>avatar_url</code></td>
+                  <td>VARCHAR</td>
+                  <td>Profile picture URL on CDN</td>
+                </tr>
+                <tr>
+                  <td><code>public_key</code></td>
+                  <td>TEXT</td>
+                  <td>E2E encryption public key</td>
+                </tr>
+                <tr>
+                  <td><code>created_at</code></td>
+                  <td>TIMESTAMP</td>
+                  <td>Account creation time</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>channels</h3>
+          <p>Represents a conversation &mdash; either a 1:1 direct message or a group chat. Every conversation is a &ldquo;channel.&rdquo;</p>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Column</th>
+                  <th>Type</th>
+                  <th>Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>channel_id</code></td>
+                  <td>UUID (PK)</td>
+                  <td>Unique channel identifier</td>
+                </tr>
+                <tr>
+                  <td><code>type</code></td>
+                  <td>ENUM</td>
+                  <td><code>direct</code> (1:1) or <code>group</code></td>
+                </tr>
+                <tr>
+                  <td><code>name</code></td>
+                  <td>VARCHAR</td>
+                  <td>Group name (null for direct channels)</td>
+                </tr>
+                <tr>
+                  <td><code>creator_id</code></td>
+                  <td>UUID (FK)</td>
+                  <td>User who created the group</td>
+                </tr>
+                <tr>
+                  <td><code>max_members</code></td>
+                  <td>INT</td>
+                  <td>Maximum allowed members (default 500 for groups)</td>
+                </tr>
+                <tr>
+                  <td><code>created_at</code></td>
+                  <td>TIMESTAMP</td>
+                  <td>Channel creation time</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>channel_members</h3>
+          <p>Maps users to channels. For a 1:1 chat, there are exactly 2 rows. For a group of 200, there are 200 rows.</p>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Column</th>
+                  <th>Type</th>
+                  <th>Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>channel_id</code></td>
+                  <td>UUID (PK, part 1)</td>
+                  <td>The channel</td>
+                </tr>
+                <tr>
+                  <td><code>user_id</code></td>
+                  <td>UUID (PK, part 2)</td>
+                  <td>The member</td>
+                </tr>
+                <tr>
+                  <td><code>role</code></td>
+                  <td>ENUM</td>
+                  <td><code>admin</code>, <code>member</code></td>
+                </tr>
+                <tr>
+                  <td><code>last_read_message_id</code></td>
+                  <td>UUID</td>
+                  <td>Last message the user has read in this channel (for read receipts)</td>
+                </tr>
+                <tr>
+                  <td><code>joined_at</code></td>
+                  <td>TIMESTAMP</td>
+                  <td>When the user joined the channel</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>messages (Cassandra)</h3>
+          <p>The messages table is the highest-volume table in the system. Stored in <strong>Cassandra</strong> (or HBase) &mdash; a wide-column store optimized for this exact access pattern.</p>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Column</th>
+                  <th>Type</th>
+                  <th>Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>channel_id</code></td>
+                  <td>UUID (<strong>Partition Key</strong>)</td>
+                  <td>All messages in a channel are co-located on the same partition</td>
+                </tr>
+                <tr>
+                  <td><code>message_id</code></td>
+                  <td>Snowflake ID (<strong>Sort Key</strong>, DESC)</td>
+                  <td>Time-ordered unique ID; messages sorted by creation time within a partition</td>
+                </tr>
+                <tr>
+                  <td><code>sender_id</code></td>
+                  <td>UUID</td>
+                  <td>User who sent the message</td>
+                </tr>
+                <tr>
+                  <td><code>content</code></td>
+                  <td>BLOB</td>
+                  <td>Encrypted message content (ciphertext with E2E encryption)</td>
+                </tr>
+                <tr>
+                  <td><code>type</code></td>
+                  <td>ENUM</td>
+                  <td><code>text</code>, <code>image</code>, <code>video</code>, <code>audio</code>, <code>file</code></td>
+                </tr>
+                <tr>
+                  <td><code>media_url</code></td>
+                  <td>VARCHAR</td>
+                  <td>CDN URL for media attachments (null for text-only)</td>
+                </tr>
+                <tr>
+                  <td><code>seq_num</code></td>
+                  <td>BIGINT</td>
+                  <td>Per-channel monotonically increasing sequence number for ordering</td>
+                </tr>
+                <tr>
+                  <td><code>reply_to</code></td>
+                  <td>UUID</td>
+                  <td>message_id of the parent message (null if not a reply)</td>
+                </tr>
+                <tr>
+                  <td><code>created_at</code></td>
+                  <td>TIMESTAMP</td>
+                  <td>Server-assigned creation timestamp</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="info-box note">
+            <strong>Why Cassandra / HBase for Messages?</strong> The message access pattern is almost exclusively: &ldquo;Get the most recent N messages for channel X&rdquo; &mdash; a classic time-series query. With <code>channel_id</code> as the partition key and <code>message_id</code> (a Snowflake ID encoding timestamp) as the sort key, Cassandra stores all messages for a channel contiguously on disk, sorted by time. A query for the latest 50 messages is a single sequential disk read from one partition &mdash; no joins, no index lookups, no scatter-gather. This is why chat systems at scale (Discord, Facebook Messenger) use wide-column stores rather than relational databases for message storage.
+          </div>
+
+<pre><code>Cassandra CQL schema:
+
+CREATE TABLE messages (
+    channel_id  UUID,
+    message_id  TIMEUUID,          -- Time-based UUID (sorted by time)
+    sender_id   UUID,
+    content     BLOB,              -- Encrypted content
+    type        TEXT,
+    media_url   TEXT,
+    seq_num     BIGINT,
+    reply_to    UUID,
+    created_at  TIMESTAMP,
+    PRIMARY KEY (channel_id, message_id)
+) WITH CLUSTERING ORDER BY (message_id DESC);
+-- DESC ordering: most recent messages first (optimized for "load latest")
+
+-- Query: Get latest 50 messages for a channel
+SELECT * FROM messages
+  WHERE channel_id = ?
+  ORDER BY message_id DESC
+  LIMIT 50;
+
+-- Query: Paginate older messages (cursor = last message_id seen)
+SELECT * FROM messages
+  WHERE channel_id = ?
+    AND message_id &lt; ?
+  ORDER BY message_id DESC
+  LIMIT 50;</code></pre>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- HIGH-LEVEL DESIGN -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="high-level-design"></span>
+        <section class="section">
+          <h2>5. High-Level Design</h2>
+
+          <p>The chat system architecture centers around a <strong>stateful WebSocket layer</strong> for real-time message delivery, backed by a <strong>message queue</strong> for reliable routing and a <strong>wide-column store</strong> for persistent message storage. A separate <strong>Presence Service</strong> tracks online/offline status using Redis with TTL-based heartbeats.</p>
+
+          <h3>System Architecture</h3>
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    subgraph MessageFlow[Message Flow]
+        SenderClient[Sender Client] <-->|WS| WS1[WebSocket Server WS1]
+        WS1 -->|Enqueue| MQ[Message Queue - Kafka]
+        MQ --> ChatSvc[Chat Service]
+        ChatSvc --> WS2[WebSocket Server WS2]
+        ChatSvc --> MsgDB[Messages DB - Cassandra]
+        ChatSvc --> OfflineQ[Offline Queue - Store and Forward]
+        WS2 <-->|WS| RecipientClient[Recipient Client]
+    end
+
+    subgraph PresenceService[Presence Service]
+        Client2[Client] -->|Heartbeat every 30s| Redis1[Redis - TTL 60s]
+    end
+
+    subgraph ConnectionRegistry[Connection Registry]
+        Redis2[Redis or ZooKeeper]
+        Redis2 --- Map1[user u_44556 maps to ws-server-07]
+        Redis2 --- Map2[user u_98765 maps to ws-server-12]
+        Redis2 --- Map3[user u_11223 maps to ws-server-03]
+    end
+
+    subgraph SupportingServices[Supporting Services]
+        CDN[CDN - Images Videos Files]
+        MediaSvc[Media Upload Service]
+        PushSvc[Push Notification Service]
+        APIGw[API Gateway - REST]
+    end
+          </div></div>
+
+          <h3>Message Delivery Flow (1:1)</h3>
+          <div class="flow-container">
+            <div class="flow-box">Sender sends message via WS</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">WS Server enqueues to Message Queue</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">Chat Service consumes, assigns seq_num</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Persist to Cassandra</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box">Lookup recipient&rsquo;s WS server</div>
+            <div class="flow-arrow">&rarr;</div>
+            <div class="flow-box highlight">Push to recipient via WS</div>
+          </div>
+
+          <h3>Key Components</h3>
+          <ul class="content-list">
+            <li><strong>WebSocket Servers:</strong> Stateful servers that maintain persistent connections with clients. Each server handles ~50K concurrent connections. When a message arrives, it is forwarded to the message queue. When a message needs to be delivered, the Chat Service looks up the recipient&rsquo;s WS server in the connection registry and pushes the message to it.</li>
+            <li><strong>Message Queue (Kafka):</strong> Decouples message ingestion from processing. Provides durability (messages are not lost if the Chat Service crashes), ordering (per-channel partition), and backpressure handling. Each channel maps to a Kafka partition for ordered processing.</li>
+            <li><strong>Chat Service:</strong> Stateless workers that consume from the message queue, assign per-channel sequence numbers, persist messages to Cassandra, and route them to the correct WebSocket server for delivery. If the recipient is offline, the message is stored for later delivery and a push notification is sent.</li>
+            <li><strong>Connection Registry (Redis):</strong> Maps each online user to the WebSocket server holding their connection. When the Chat Service needs to deliver a message, it looks up <code>user:{recipient_id}</code> in Redis to find which WS server to forward to.</li>
+            <li><strong>Presence Service (Redis):</strong> Tracks online/offline status using TTL-based keys. Each client sends a heartbeat every 30 seconds, refreshing a Redis key with a 60-second TTL. If the key expires, the user is considered offline.</li>
+            <li><strong>Push Notification Service:</strong> Sends APNs (iOS) or FCM (Android) push notifications to offline users when they receive a message. The notification contains a preview of the message to prompt the user to open the app.</li>
+          </ul>
+
+          <div class="info-box important">
+            <strong>Why a Message Queue Between WS Server and Chat Service?</strong> Without a queue, if the Chat Service is down or slow, the WS server would have to buffer messages in memory &mdash; risking data loss on crash. The message queue (Kafka) provides: (1) <strong>durability</strong> &mdash; messages survive server crashes, (2) <strong>ordering</strong> &mdash; messages within a channel are processed in order, (3) <strong>backpressure</strong> &mdash; if the Chat Service falls behind, messages queue up safely instead of being dropped, and (4) <strong>decoupling</strong> &mdash; WS servers and Chat Service can scale independently.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- DEEP DIVE -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="deep-dive"></span>
+        <section class="section">
+          <h2>6. Deep Dive</h2>
+
+          <!-- 6a. Communication Protocols -->
+          <h3>6a. Communication Protocols: Polling vs. Long Polling vs. WebSocket vs. SSE</h3>
+          <p>Choosing the right communication protocol is the most fundamental architectural decision for a chat system. The protocol determines latency, resource usage, and scalability.</p>
+
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Protocol</th>
+                  <th>How It Works</th>
+                  <th>Latency</th>
+                  <th>Server Resources</th>
+                  <th>Bidirectional?</th>
+                  <th>Best For</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>HTTP Polling</strong></td>
+                  <td>Client sends GET every N seconds asking &ldquo;any new messages?&rdquo;</td>
+                  <td>High (up to N seconds)</td>
+                  <td>Very high &mdash; most requests return empty</td>
+                  <td>No</td>
+                  <td>Simple dashboards, low-frequency updates</td>
+                </tr>
+                <tr>
+                  <td><strong>Long Polling</strong></td>
+                  <td>Client sends GET; server holds the connection open until new data is available or timeout</td>
+                  <td>Medium (~1-2s)</td>
+                  <td>High &mdash; one thread per waiting client</td>
+                  <td>No</td>
+                  <td>Notifications, fallback for WebSocket</td>
+                </tr>
+                <tr>
+                  <td><strong>Server-Sent Events (SSE)</strong></td>
+                  <td>Server pushes events to client over a persistent HTTP connection</td>
+                  <td>Low (~100ms)</td>
+                  <td>Medium &mdash; persistent connection, but unidirectional</td>
+                  <td>No (server &rarr; client only)</td>
+                  <td>Live feeds, stock tickers, notifications</td>
+                </tr>
+                <tr>
+                  <td><strong>WebSocket</strong></td>
+                  <td>Full-duplex persistent TCP connection; both sides can send data at any time</td>
+                  <td>Very low (&lt;50ms)</td>
+                  <td>Low per connection &mdash; no HTTP overhead after handshake</td>
+                  <td>Yes</td>
+                  <td>Chat, gaming, collaborative editing</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="comparison-grid">
+            <div class="comparison-card">
+              <h4>HTTP Polling (Bad for Chat)</h4>
+<pre><code>Client: Any new messages? (GET /messages)
+Server: No.
+Client: Any new messages? (GET /messages)
+Server: No.
+Client: Any new messages? (GET /messages)
+Server: Yes! Here's 1 message.
+Client: Any new messages? (GET /messages)
+Server: No.
+
+Problem: 75% of requests are wasted.
+At 10M users polling every 2s:
+= 5M requests/sec of pure waste.</code></pre>
+            </div>
+            <div class="comparison-card">
+              <h4>WebSocket (Ideal for Chat)</h4>
+<pre><code>Client: [Opens WS connection]
+Server: [Connection established]
+  ... (silence, no traffic) ...
+Server: New message! {data: "Hi!"}
+  ... (silence, no traffic) ...
+Client: Sending message {data: "Hey!"}
+Server: ACK.
+Server: New message! {data: "What's up?"}
+
+No wasted requests. Zero overhead
+when idle. Instant delivery.
+10M users = 10M open connections
+(~200 WS servers at 50K each).</code></pre>
+            </div>
+          </div>
+
+          <div class="info-box tip">
+            <strong>Why WebSocket Wins for Chat:</strong> Chat requires <strong>bidirectional</strong> real-time communication. The client needs to both send and receive messages instantly. SSE is server-to-client only &mdash; the client would still need a separate HTTP request to send messages, adding latency and complexity. WebSocket provides a single persistent connection for both directions, with minimal overhead (just 2-byte frame headers vs. ~800 bytes for HTTP headers on every request). The trade-off is statefulness &mdash; each connection is pinned to a specific server, requiring a connection registry for routing.
+          </div>
+
+          <!-- 6b. 1:1 Message Flow -->
+          <h3>6b. 1:1 Message Flow &mdash; Online and Offline Recipients</h3>
+          <p>The message delivery flow differs depending on whether the recipient is currently online (has an active WebSocket connection) or offline.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+sequenceDiagram
+    participant A as User A - Sender
+    participant S as System
+    participant B as User B - Recipient
+
+    Note over A,B: Case 1 - Recipient is Online
+
+    A->>S: message.send - Hi!
+    S->>S: Enqueue to Kafka
+    S->>S: Chat Service consumes
+    S->>S: Assign seq_num 1042
+    S->>S: Persist to Cassandra
+    S->>S: Lookup B WS server in Redis
+    S-->>A: message.ack status sent
+    S->>B: message.new msg_xyz seq 1042
+    B-->>S: delivery.ack msg_xyz
+    S-->>A: message.ack status delivered
+
+    Note over A,B: Total latency 50 to 100ms end to end
+
+    Note over A,B: Case 2 - Recipient is Offline
+
+    A->>S: message.send - Hi!
+    S->>S: Assign seq_num and persist to Cassandra
+    S->>S: Lookup B in Redis - NOT FOUND
+    S->>S: Store in offline message queue
+    S-->>A: message.ack status sent
+    S->>B: Push Notification via APNs or FCM
+
+    Note over S,B: Later User B comes online
+    B->>S: Connect via WebSocket
+    S->>S: Drain offline queue
+    S->>B: Deliver all pending messages
+    S-->>A: message.ack status delivered
+          </div></div>
+
+          <div class="info-box note">
+            <strong>Store and Forward:</strong> The &ldquo;store and forward&rdquo; pattern ensures no messages are lost when a recipient is offline. Messages are persisted to Cassandra immediately (durable storage) and also placed in an offline delivery queue. When the recipient reconnects, the system drains their offline queue and delivers all pending messages. The push notification serves as a &ldquo;nudge&rdquo; to prompt the user to open the app &mdash; it is not the delivery mechanism itself.
+          </div>
+
+          <!-- 6c. Group Chat Fan-out -->
+          <h3>6c. Group Chat &mdash; Fan-out on Write vs. Fan-out on Read</h3>
+          <p>Group chat introduces a fan-out problem: when one member sends a message, all other members must receive it. The strategy depends on group size.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    subgraph FanOutWrite[Small Group - Fan-out on Write - 50 or fewer members]
+        A1[User A sends Hello everyone] --> CS1[Chat Service]
+        CS1 --> P1[1. Persist to Cassandra - 1 write]
+        CS1 --> GM1[2. Get group members B C D E F G H I J]
+        CS1 --> IW1[3. Write to each members inbox - 9 writes]
+        CS1 --> WS1[4. Push to online members via WebSocket]
+        IW1 --> InboxB[inbox B]
+        IW1 --> InboxC[inbox C]
+        IW1 --> InboxD[inbox D and others]
+    end
+
+    subgraph FanOutRead[Large Group - Fan-out on Read - 50 to 500 members]
+        A2[User A sends Hello everyone] --> CS2[Chat Service]
+        CS2 --> P2[1. Persist to Cassandra - 1 write only]
+        CS2 --> WS2[2. Push to online members only via WebSocket]
+        CS2 -.->|No inbox writes| Skip[3. Do NOT write to individual inboxes]
+    end
+
+    subgraph SyncOnReconnect[When offline member comes online]
+        Member[Offline member reconnects] --> Sync[Sync Service]
+        Sync --> Check[1. Check last_read_message_id]
+        Sync --> Query[2. Query Cassandra for unread messages]
+        Sync --> Deliver[3. Deliver unread messages to client]
+    end
+          </div></div>
+
+          <div class="comparison-grid">
+            <div class="comparison-card">
+              <h4>Fan-out on Write (Small Groups)</h4>
+              <ul class="content-list">
+                <li>Write to each member&rsquo;s inbox when message is sent</li>
+                <li>Instant delivery &mdash; inbox is pre-populated</li>
+                <li>Write cost: O(N) per message where N = group size</li>
+                <li>Acceptable when N &le; 50 (50 writes per message)</li>
+                <li>Used by: WhatsApp, iMessage</li>
+              </ul>
+            </div>
+            <div class="comparison-card">
+              <h4>Fan-out on Read (Large Groups)</h4>
+              <ul class="content-list">
+                <li>Only persist to Cassandra; no inbox writes</li>
+                <li>Members pull unread messages when they open the group</li>
+                <li>Write cost: O(1) per message regardless of group size</li>
+                <li>Read cost: one Cassandra query per group open</li>
+                <li>Used by: Slack, Discord, Telegram (large groups)</li>
+              </ul>
+            </div>
+          </div>
+
+          <!-- 6d. Online Presence -->
+          <h3>6d. Online Presence &mdash; Heartbeat Mechanism</h3>
+          <p>Presence tracking answers the question: &ldquo;Is this user currently online?&rdquo; This seems simple but becomes challenging at scale due to the volume of status changes and the need to propagate updates to interested parties.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+sequenceDiagram
+    participant C as Client
+    participant R as Redis Presence Store
+
+    Note over C,R: Heartbeat-based Presence with Redis TTL
+
+    C->>R: Heartbeat - SET presence u_44556 ws-server-07 EX 60
+    Note over R: TTL set to 60 seconds
+
+    C->>R: Heartbeat 30s later - SET presence u_44556 EX 60
+    Note over R: TTL refreshed
+
+    Note over C: User closes app or crashes
+
+    Note over R: 60 seconds pass with no heartbeat
+    Note over R: Key expires automatically
+    Note over R: User is now offline
+
+    Note over C,R: TTL-based avoids ghost presence from crashes
+    Note over C,R: Hybrid approach - explicit offline on graceful close plus TTL safety net
+          </div></div>
+
+          <h4>Presence Fan-out to Friends</h4>
+          <p>When a user comes online or goes offline, their contacts should see the status change. But fanning out presence updates to all contacts is expensive.</p>
+
+          <div class="diagram-box">
+<pre>
+    PRESENCE FAN-OUT STRATEGIES
+    ═══════════════════════════════════════════════════════════════
+
+    NAIVE APPROACH (Too Expensive):
+    User A comes online → notify all 300 contacts
+    If 10M users toggle online/offline per hour:
+    = 10M × 300 = 3 BILLION presence notifications/hour
+    = 833,000 notifications/sec → Not feasible!
+
+    OPTIMIZED APPROACH (Lazy + Subscription):
+    ┌──────────────────────────────────────────────────────────┐
+    │                                                          │
+    │  1. SUBSCRIBE ON OPEN: When User B opens a chat with     │
+    │     User A, B subscribes to A's presence channel.        │
+    │     Only active chat windows receive presence updates.   │
+    │                                                          │
+    │  2. POLL ON LOAD: When User B opens their chat list,     │
+    │     batch-fetch presence for visible contacts only:      │
+    │     MGET presence:u_1 presence:u_2 ... presence:u_20    │
+    │     (Only the 20 contacts visible on screen)             │
+    │                                                          │
+    │  3. SMALL GROUP FAN-OUT: For group chats with ≤50        │
+    │     members, fan out presence changes to all members.    │
+    │     For large groups, show presence only when viewing    │
+    │     the member list (poll on demand).                    │
+    │                                                          │
+    │  Result: Presence notifications drop from 833K/sec       │
+    │  to ~10K/sec (only active chat windows).                 │
+    └──────────────────────────────────────────────────────────┘
+</pre>
+          </div>
+
+          <!-- 6e. Message Ordering -->
+          <h3>6e. Message Ordering &mdash; Sequence Numbers and Snowflake IDs</h3>
+          <p>Message ordering is critical for chat &mdash; messages must appear in the correct causal order. If User A says &ldquo;Want to grab lunch?&rdquo; and User B replies &ldquo;Sure!&rdquo;, the reply must always appear after the question, on every device, for every participant.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+sequenceDiagram
+    participant A as User A - Sender
+    participant CS as Chat Service
+    participant DB as Cassandra
+    participant B as User B - Recipient
+
+    Note over CS: channel: ch_7f3a9b2c, current_seq: 1041
+
+    A->>CS: "Want lunch?"
+    CS->>CS: seq_num = ++current_seq = 1042
+    CS->>DB: Store msg_1 seq 1042
+    CS->>B: Deliver msg_1 seq 1042
+    CS-->>A: ACK status sent seq 1042
+
+    B->>CS: "Sure!" (reply)
+    CS->>CS: seq_num = ++current_seq = 1043
+    CS->>DB: Store msg_2 seq 1043
+    CS->>A: Deliver msg_2 seq 1043
+    CS-->>B: ACK status sent seq 1043
+
+    Note over A,B: Display order: 1042 "Want lunch?" then 1043 "Sure!"
+          </div></div>
+
+          <h4>Snowflake IDs for Global Uniqueness</h4>
+          <div class="mermaid-container"><div class="mermaid">
+graph LR
+    SIGN["Sign Bit\n1 bit"]
+    TS["Timestamp\n41 bits\n~69 years"]
+    MID["Machine ID\n10 bits\n1024 nodes"]
+    SEQ["Sequence\n12 bits\n4096/ms"]
+
+    SIGN --> TS --> MID --> SEQ
+
+    style SIGN fill:#e74c3c,color:#fff
+    style TS fill:#3498db,color:#fff
+    style MID fill:#2ecc71,color:#fff
+    style SEQ fill:#f39c12,color:#fff
+          </div></div>
+
+          <div class="info-box warning">
+            <strong>Handling Out-of-Order Delivery:</strong> Even with server-assigned sequence numbers, messages can arrive at the client out of order due to network jitter (message 1043 arrives before 1042). The client must buffer incoming messages and re-sort by <code>seq_num</code> before displaying. If a gap is detected (received 1042, then 1044 &mdash; missing 1043), the client should request the missing message from the server via REST: <code>GET /api/v1/messages?channel_id=X&amp;after_seq=1042&amp;before_seq=1044</code>. This ensures the conversation is always displayed in the correct order.
+          </div>
+
+          <!-- 6f. Message Storage -->
+          <h3>6f. Message Storage &mdash; Cassandra with Caching</h3>
+          <p>Message storage must handle 23K writes/sec with 365 TB over 5 years, while supporting fast reads for recent messages. The architecture uses Cassandra as the primary store with Redis caching for hot data.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+graph TD
+    subgraph ReadPath[Read Path]
+        RC[Client requests\nlatest messages] --> RCache{Redis Cache\nmsgs:ch_1}
+        RCache -->|HIT| RHit[Return cached\nmessages]
+        RCache -->|MISS| Cass[Cassandra\npartition: channel_id\nsort: message_id DESC]
+        Cass --> RPopulate[Return from disk\n+ Populate Redis]
+    end
+
+    subgraph WritePath[Write Path]
+        WC[New message\narrives] --> WDB[Write to Cassandra\n- source of truth]
+        WC --> WRedis[Append to Redis Cache\nLPUSH msgs:ch_1\nLTRIM to 50]
+    end
+
+    style ReadPath fill:#2c3e50,color:#ecf0f1
+    style WritePath fill:#34495e,color:#ecf0f1
+    style RCache fill:#9b59b6,color:#fff
+    style Cass fill:#3498db,color:#fff
+    style WDB fill:#3498db,color:#fff
+    style WRedis fill:#e74c3c,color:#fff
+          </div></div>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> Mention partition sizing proactively. &ldquo;For most channels, the partition size stays well under 100 MB. But for very active groups, we can add a time bucket to the partition key &mdash; <code>PRIMARY KEY ((channel_id, month), message_id)</code> &mdash; to bound partition growth. The trade-off is that queries spanning multiple months require reading from multiple partitions, but this is rare since users almost always read recent messages.&rdquo;
+          </div>
+
+          <!-- 6g. Read Receipts and Delivery Status -->
+          <h3>6g. Read Receipts and Delivery Status</h3>
+          <p>Messages transition through a state machine: <strong>sent &rarr; delivered &rarr; read</strong>. Each state change is communicated back to the sender as a visual indicator.</p>
+
+          <div class="mermaid-container"><div class="mermaid">
+stateDiagram-v2
+    [*] --> SENT: Chat Service persists\nto Cassandra
+    SENT --> DELIVERED: Recipient device\nreceives message
+    DELIVERED --> READ: Recipient opens\nchat window
+    READ --> [*]
+
+    SENT: SENT\n✓ gray
+    DELIVERED: DELIVERED\n✓✓ gray
+    READ: READ\n✓✓ blue
+          </div></div>
+
+          <div class="info-box note">
+            <strong>Optimization &mdash; Batched Read Receipts:</strong> Instead of sending a read receipt for every individual message, the client sends only the <code>last_read_message_id</code> when the user opens a chat. Since messages are ordered by sequence number, all messages with <code>seq_num &le; last_read_seq</code> are implicitly marked as read. This reduces read receipt traffic from O(unread_messages) to O(1) per chat open. WhatsApp uses this approach &mdash; when you open a chat with 50 unread messages, only one read receipt event is sent.
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- TRADE-OFFS -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="tradeoffs"></span>
+        <section class="section">
+          <h2>7. Trade-offs</h2>
+
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Decision</th>
+                  <th>Option A</th>
+                  <th>Option B</th>
+                  <th>Recommendation</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>WebSocket vs. SSE</strong></td>
+                  <td><strong>WebSocket:</strong> Full-duplex, both client and server can send data. Requires stateful connection management. More complex server infrastructure (connection registry, sticky sessions).</td>
+                  <td><strong>SSE (Server-Sent Events):</strong> Server-to-client only. Client still uses HTTP POST to send messages. Simpler server-side (standard HTTP). Automatic reconnection built into the browser API.</td>
+                  <td>Use <strong>WebSocket</strong>. Chat is inherently bidirectional &mdash; both sending and receiving happen on the same connection. SSE would require a separate HTTP channel for sending, adding latency (~50ms extra per message) and complexity. WebSocket&rsquo;s 2-byte frame overhead vs. SSE&rsquo;s HTTP headers also matters at 23K msg/sec.</td>
+                </tr>
+                <tr>
+                  <td><strong>Push vs. Pull for Group Messages</strong></td>
+                  <td><strong>Push (fan-out on write):</strong> Write to each member&rsquo;s inbox when a message is sent. Instant delivery. Write cost = O(group_size) per message. Works well for small groups (&le;50 members).</td>
+                  <td><strong>Pull (fan-out on read):</strong> Only persist to the channel&rsquo;s message store. Members pull unread messages when they open the group. Write cost = O(1). Read cost = one Cassandra query per group open.</td>
+                  <td>Use <strong>push for small groups (&le;50)</strong> and <strong>pull for large groups (50&ndash;500)</strong>. Small groups have high engagement (most members read most messages), so pre-populating inboxes avoids redundant reads. Large groups have low per-member engagement (most are lurkers), so push would waste writes on members who never read.</td>
+                </tr>
+                <tr>
+                  <td><strong>Message Ordering Guarantees</strong></td>
+                  <td><strong>Total ordering:</strong> All messages across all channels are globally ordered. Requires a single sequencer (bottleneck). Unnecessary for chat &mdash; messages in different channels don&rsquo;t need relative ordering.</td>
+                  <td><strong>Per-channel ordering:</strong> Messages within a single channel are strictly ordered via per-channel sequence numbers. Different channels are independent. Scales horizontally (one sequencer per channel).</td>
+                  <td>Use <strong>per-channel ordering</strong>. Chat only requires causal ordering within a conversation. A message in &ldquo;Work Chat&rdquo; doesn&rsquo;t need to be ordered relative to a message in &ldquo;Family Group.&rdquo; Per-channel sequence numbers are assigned by the Chat Service and stored alongside each message.</td>
+                </tr>
+                <tr>
+                  <td><strong>Storage Engine: Cassandra vs. PostgreSQL vs. MongoDB</strong></td>
+                  <td><strong>PostgreSQL:</strong> ACID, rich queries, mature tooling. Harder to shard. Good for user/channel metadata. Not ideal for 365 TB of append-only message data.</td>
+                  <td><strong>Cassandra:</strong> Built for massive write throughput and horizontal scaling. Partition key (channel_id) + sort key (message_id) perfectly matches the chat query pattern. No joins needed. Eventual consistency is acceptable for messages.</td>
+                  <td>Use <strong>Cassandra for messages</strong> and <strong>PostgreSQL for users, channels, and channel_members</strong>. Messages are append-only, time-series data with a simple access pattern (get by channel, sorted by time) &mdash; Cassandra&rsquo;s sweet spot. User and channel metadata require relational integrity (foreign keys, unique constraints) &mdash; PostgreSQL&rsquo;s strength.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="info-box tip">
+            <strong>Interview Tip:</strong> When discussing trade-offs, always connect your choice to the specific requirements. &ldquo;We chose WebSocket over SSE because our FR requires bidirectional real-time messaging, and our NFR demands sub-100ms delivery. SSE would add an extra HTTP round-trip for sending, pushing us past the latency budget. The trade-off is operational complexity &mdash; we need a connection registry to track which server holds each user&rsquo;s WebSocket &mdash; but this is a well-understood pattern used by WhatsApp, Slack, and Discord.&rdquo;
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- REVISION CHECKLIST -->
+        <!-- ============================================================ -->
+        <span class="section-anchor" id="revision"></span>
+        <section class="section">
+          <h2>8. Revision Checklist</h2>
+          <p>Use this checklist to verify you can recall the key concepts before your interview.</p>
+
+          <div class="checklist">
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>WebSocket</strong> is the correct protocol for chat because it provides full-duplex, persistent connections with minimal overhead. HTTP polling wastes resources (most responses are empty), long polling ties up server threads, and SSE is unidirectional (server &rarr; client only). WebSocket enables sub-100ms delivery with 2-byte frame headers.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>The <strong>1:1 message flow</strong> is: sender &rarr; WS server &rarr; message queue (Kafka) &rarr; Chat Service (assign seq_num, persist to Cassandra) &rarr; lookup recipient&rsquo;s WS server in Redis &rarr; push to recipient. If the recipient is offline, use <strong>store and forward</strong>: persist the message and send a push notification. Deliver when the recipient reconnects.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Group chat fan-out</strong> uses two strategies: <strong>fan-out on write</strong> for small groups (&le;50 members) &mdash; write to each member&rsquo;s inbox for instant delivery; <strong>fan-out on read</strong> for large groups (50&ndash;500 members) &mdash; persist once to Cassandra and let members pull unread messages when they open the group.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Online presence</strong> uses a heartbeat mechanism: clients send a heartbeat every 30 seconds, refreshing a Redis key with a 60-second TTL. If the key expires (no heartbeat), the user is offline. This handles ungraceful disconnects (crashes, network drops) without relying on explicit &ldquo;offline&rdquo; events.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Presence fan-out</strong> is optimized by only notifying active chat windows (subscribe-on-open), not all contacts. Batch-fetch presence for visible contacts using Redis MGET. This reduces presence notifications from ~833K/sec to ~10K/sec.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Message ordering</strong> uses per-channel sequence numbers assigned by the server (not client timestamps, which are unreliable). Snowflake IDs provide globally unique, time-ordered message IDs. Clients re-sort by seq_num and request missing messages if gaps are detected.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Cassandra</strong> is ideal for message storage because the access pattern (get messages by channel, sorted by time) maps perfectly to its data model: <code>channel_id</code> as partition key, <code>message_id</code> (Snowflake) as sort key. All messages for a channel are co-located on disk for fast sequential reads.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>Read receipts</strong> follow a state machine: sent &rarr; delivered &rarr; read. Receipts are batched &mdash; the client sends only the <code>last_read_message_id</code>, implicitly marking all prior messages as read. This reduces receipt traffic from O(unread) to O(1) per chat open.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>The <strong>connection registry</strong> (Redis) maps each online user to their WebSocket server. When the Chat Service needs to deliver a message, it looks up <code>user:{recipient_id}</code> to find the correct WS server. This is necessary because WebSocket connections are stateful and pinned to specific servers.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span><strong>At-least-once delivery</strong> is achieved via client-generated <code>local_id</code> (UUID) for deduplication. If the client doesn&rsquo;t receive an ACK, it retries with the same <code>local_id</code>. The server detects duplicates and discards them. Exactly-once is unnecessary &mdash; client-side dedup is simpler and sufficient.</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>The <strong>message queue (Kafka)</strong> between WS servers and Chat Service provides durability (survives crashes), ordering (per-channel partitions), backpressure (buffers during load spikes), and decoupling (WS servers and Chat Service scale independently).</span>
+            </label>
+            <label class="checklist-item">
+              <input type="checkbox">
+              <span>At <strong>50M DAU</strong> scale: 2B messages/day = ~23K msg/sec, 10M concurrent WebSocket connections across ~200 servers, 200 GB/day message storage (365 TB over 5 years), 333K heartbeats/sec for presence. The system is write-heavy (unlike news feed which is read-heavy), driving the choice of Cassandra over PostgreSQL for messages.</span>
+            </label>
+          </div>
+        </section>
+
+        <!-- Bottom nav -->
+        <div class="problem-nav">
+          <a href="news-feed.html"><span class="nav-label">Previous</span><span class="nav-title">News Feed</span></a>
+          <a href="search-autocomplete.html" class="next"><span class="nav-label">Next</span><span class="nav-title">Search Autocomplete</span></a>
+        </div>
+      </div>
+    </div>
+  </main>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script src="../js/app.js"></script>
+</body>
+</html>
