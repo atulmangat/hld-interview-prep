@@ -31,24 +31,37 @@ const ThemeManager = {
 const SearchFilter = {
   init() {
     const searchInput = document.getElementById('search-input');
+    const searchInputMobile = document.getElementById('search-input-mobile');
     const filterBtns = document.querySelectorAll('.filter-btn');
     const cards = document.querySelectorAll('.problem-card');
 
-    if (!searchInput || !cards.length) return;
+    if (!cards.length) return;
 
-    searchInput.addEventListener('input', () => this.filter(searchInput, cards));
+    // Sync both search inputs
+    const syncAndFilter = (source) => {
+      if (searchInput && source !== searchInput) searchInput.value = source.value;
+      if (searchInputMobile && source !== searchInputMobile) searchInputMobile.value = source.value;
+      this.filter(source, cards);
+    };
+
+    if (searchInput) {
+      searchInput.addEventListener('input', () => syncAndFilter(searchInput));
+    }
+    if (searchInputMobile) {
+      searchInputMobile.addEventListener('input', () => syncAndFilter(searchInputMobile));
+    }
 
     filterBtns.forEach(btn => {
       btn.addEventListener('click', () => {
         filterBtns.forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
-        this.filter(searchInput, cards);
+        this.filter(searchInput || searchInputMobile || { value: '' }, cards);
       });
     });
   },
 
   filter(searchInput, cards) {
-    const query = searchInput.value.toLowerCase().trim();
+    const query = (searchInput?.value || '').toLowerCase().trim();
     const activeFilter = document.querySelector('.filter-btn.active');
     const category = activeFilter ? activeFilter.dataset.category : 'all';
 
@@ -131,17 +144,105 @@ const Shortcuts = {
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
         e.preventDefault();
         const input = document.getElementById('search-input');
-        if (input) input.focus();
+        if (input) {
+          // On mobile, open search bar first
+          const mobileBar = document.querySelector('.mobile-search-bar');
+          if (mobileBar && !mobileBar.classList.contains('active')) {
+            MobileUI.toggleSearch();
+          }
+          input.focus();
+        }
       }
 
-      // Escape to blur search
+      // Escape to close drawers/overlays
       if (e.key === 'Escape') {
+        MobileUI.closeSidebar();
+        MobileUI.closeSearch();
         const input = document.getElementById('search-input');
         if (input && document.activeElement === input) {
           input.blur();
         }
       }
     });
+  }
+};
+
+// --- Mobile UI (sidebar drawer, search bar) ---
+const MobileUI = {
+  init() {
+    const menuBtn = document.getElementById('mobile-menu-btn');
+    const searchBtn = document.getElementById('mobile-search-btn');
+    const sidebarOverlay = document.getElementById('sidebar-overlay');
+    const sidebar = document.querySelector('.sidebar');
+
+    if (menuBtn) {
+      menuBtn.addEventListener('click', () => this.toggleSidebar());
+    }
+
+    if (searchBtn) {
+      searchBtn.addEventListener('click', () => this.toggleSearch());
+    }
+
+    if (sidebarOverlay) {
+      sidebarOverlay.addEventListener('click', () => this.closeSidebar());
+    }
+
+    // Close sidebar when a TOC link is clicked on mobile
+    if (sidebar) {
+      sidebar.querySelectorAll('.toc-list a').forEach(link => {
+        link.addEventListener('click', () => this.closeSidebar());
+      });
+    }
+  },
+
+  toggleSidebar() {
+    const sidebar = document.querySelector('.sidebar');
+    const overlay = document.getElementById('sidebar-overlay');
+    const menuBtn = document.getElementById('mobile-menu-btn');
+    if (!sidebar) return;
+
+    const isOpen = sidebar.classList.contains('open');
+    if (isOpen) {
+      this.closeSidebar();
+    } else {
+      sidebar.classList.add('open');
+      overlay?.classList.add('active');
+      menuBtn?.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+  },
+
+  closeSidebar() {
+    const sidebar = document.querySelector('.sidebar');
+    const overlay = document.getElementById('sidebar-overlay');
+    const menuBtn = document.getElementById('mobile-menu-btn');
+    sidebar?.classList.remove('open');
+    overlay?.classList.remove('active');
+    menuBtn?.classList.remove('active');
+    document.body.style.overflow = '';
+  },
+
+  toggleSearch() {
+    const bar = document.querySelector('.mobile-search-bar');
+    const btn = document.getElementById('mobile-search-btn');
+    if (!bar) return;
+
+    const isActive = bar.classList.contains('active');
+    if (isActive) {
+      this.closeSearch();
+    } else {
+      bar.classList.add('active');
+      btn?.classList.add('active');
+      const input = bar.querySelector('input');
+      if (input) setTimeout(() => input.focus(), 100);
+    }
+  },
+
+  closeSearch() {
+    const bar = document.querySelector('.mobile-search-bar');
+    const btn = document.getElementById('mobile-search-btn');
+    bar?.classList.remove('active');
+    btn?.classList.remove('active');
   }
 };
 
@@ -458,6 +559,7 @@ document.addEventListener('DOMContentLoaded', () => {
   MermaidManager.init();
   ScrollProgress.init();
   FullscreenMermaid.init();
+  MobileUI.init();
 
   // Theme toggle button
   const toggleBtn = document.getElementById('theme-toggle');
